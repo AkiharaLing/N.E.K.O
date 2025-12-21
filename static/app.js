@@ -547,18 +547,21 @@ function init_app() {
                     showVoicePreparingToast(preparingMessage);
                 } else if (response.type === 'session_started') {
                     console.log('收到session_started事件，模式:', response.input_mode);
-                    // 隐藏准备中提示
-                    hideVoicePreparingToast();
-                    // 解析 session_started Promise
-                    if (sessionStartedResolver) {
-                        // 清除可能存在的超时定时器（通过全局变量）
-                        if (window.sessionTimeoutId) {
-                            clearTimeout(window.sessionTimeoutId);
-                            window.sessionTimeoutId = null;
+                    // 延迟 500ms 以确保准备中提示不会消失得太快
+                    setTimeout(() => {
+                        // 隐藏准备中提示
+                        hideVoicePreparingToast();
+                        // 解析 session_started Promise
+                        if (sessionStartedResolver) {
+                            // 清除可能存在的超时定时器（通过全局变量）
+                            if (window.sessionTimeoutId) {
+                                clearTimeout(window.sessionTimeoutId);
+                                window.sessionTimeoutId = null;
+                            }
+                            sessionStartedResolver(response.input_mode);
+                            sessionStartedResolver = null;
                         }
-                        sessionStartedResolver(response.input_mode);
-                        sessionStartedResolver = null;
-                    }
+                    }, 500);
                 } else if (response.type === 'reload_page') {
                     console.log('收到reload_page事件：', response.message);
                     // 显示提示信息
