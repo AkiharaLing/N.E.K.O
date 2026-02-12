@@ -673,7 +673,6 @@ class ConfigManager:
             result = (ip_country.upper() != 'CN') if ip_country else False
             
             print(f"[GeoIP DEBUG] Is non-mainland: {result}", file=sys.stderr)
-            print(f"[GeoIP DEBUG] URL replacement: {'lanlan.tech -> lanlan.app' if result else 'NO CHANGE'}", file=sys.stderr)
             print("=" * 60, file=sys.stderr)
             
             # Cache only when we get a definitive answer
