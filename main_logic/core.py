@@ -674,6 +674,11 @@ class LLMSessionManager:
         old_voice_id = self.voice_id
         self.voice_id = lanlan_basic_config_updated.get(self.lanlan_name, {}).get('voice_id', '')
         
+        # 判断是否为免费预设音色（来自 api_providers.json 的 free_voices）
+        from utils.api_config_loader import get_free_voices
+        free_voices = get_free_voices()
+        self._is_free_preset_voice = bool(self.voice_id and self.voice_id in free_voices.values())
+        
         # 如果角色没有设置 voice_id，尝试使用自定义API配置的 TTS_VOICE_ID 作为回退
         if not self.voice_id:
             core_config = self._config_manager.get_core_config()
@@ -685,6 +690,8 @@ class LLMSessionManager:
         
         if old_voice_id != self.voice_id:
             logger.info(f"🔄 voice_id已更新: '{old_voice_id}' -> '{self.voice_id}'")
+        if self._is_free_preset_voice:
+            logger.info(f"🆓 当前使用免费预设音色: '{self.voice_id}'")
         
         # 日志输出模型配置（直接从配置读取，避免创建不必要的实例变量）
         _realtime_model = realtime_config.get('model', '')
@@ -753,9 +760,9 @@ class LLMSessionManager:
             
             # 启动TTS线程
             if self.tts_thread is None or not self.tts_thread.is_alive():
-                # 判断是否使用自定义 TTS：有 voice_id 或 配置了自定义 TTS URL
+                # 判断是否使用自定义 TTS：有 voice_id（但不是免费预设）或 配置了自定义 TTS URL
                 core_config = self._config_manager.get_core_config()
-                has_custom_tts = bool(self.voice_id) or (
+                has_custom_tts = (bool(self.voice_id) and not self._is_free_preset_voice) or (
                     core_config.get('ENABLE_CUSTOM_API') and 
                     core_config.get('TTS_MODEL_URL')
                 )
@@ -769,6 +776,7 @@ class LLMSessionManager:
                 self.tts_request_queue = Queue()  # TTS request (线程队列)
                 self.tts_response_queue = Queue()  # TTS response (线程队列)
                 # 根据是否有自定义音色/TTS配置选择 TTS API 配置
+                # 免费预设音色使用 tts_default（走 step/free TTS 通道）
                 if has_custom_tts:
                     tts_config = self._config_manager.get_model_api_config('tts_custom')
                 else:
@@ -781,7 +789,7 @@ class LLMSessionManager:
                 self.tts_thread.start()
                 
                 # 等待TTS进程发送就绪信号（最多等待8秒）
-                tts_type = "自定义TTS" if has_custom_tts else f"{self.core_api_type}默认TTS"
+                tts_type = "免费预设TTS" if self._is_free_preset_voice else ("自定义TTS" if has_custom_tts else f"{self.core_api_type}默认TTS")
                 logger.info(f"🎤 TTS进程已启动，等待就绪... (使用: {tts_type})")
                 
                 tts_ready = False

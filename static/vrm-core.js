@@ -403,7 +403,7 @@ class VRMCore {
         canvas.style.setProperty('pointer-events', 'auto', 'important');
         canvas.style.setProperty('touch-action', 'none', 'important');
         canvas.style.setProperty('user-select', 'none', 'important');
-        canvas.style.cursor = 'grab';
+        canvas.style.cursor = 'default';
         canvas.style.width = '100%';
         canvas.style.height = '100%';
         canvas.style.display = 'block';

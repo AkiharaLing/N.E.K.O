@@ -1166,7 +1166,20 @@ async def get_microphone():
 async def get_voices():
     """获取当前API key对应的所有已注册音色"""
     _config_manager = get_config_manager()
-    return {"voices": _config_manager.get_voices_for_current_api()}
+    result = {"voices": _config_manager.get_voices_for_current_api()}
+    
+    # 如果是免费版且使用 lanlan.tech，附带免费预设音色
+    core_config = _config_manager.get_core_config()
+    if core_config.get('IS_FREE_VERSION'):
+        core_url = core_config.get('CORE_URL', '')
+        openrouter_url = core_config.get('OPENROUTER_URL', '')
+        if 'lanlan.tech' in core_url or 'lanlan.tech' in openrouter_url:
+            from utils.api_config_loader import get_free_voices
+            free_voices = get_free_voices()
+            if free_voices:
+                result["free_voices"] = free_voices
+    
+    return result
 
 
 @router.get('/voice_preview')

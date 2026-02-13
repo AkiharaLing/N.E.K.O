@@ -1013,7 +1013,9 @@
     "deleting": "삭제 중...",
     "deleteSuccess": "음성 \"{{name}}\"이(가) 성공적으로 삭제되었습니다.",
     "deleteFailed": "삭제 실패",
-    "deleteError": "삭제 실패: {{error}}"
+    "deleteError": "삭제 실패: {{error}}",
+    "freePresetLabel": "무료 사전 설정",
+    "freePresetBadge": "사전 설정"
   },
   "memory": {
     "title": "메모리 브라우저",
@@ -1137,7 +1139,8 @@
     "unregisterFailed": "등록을 취소하지 못했습니다.",
     "unregisterError": "등록을 취소하는 동안 오류가 발생했습니다.",
     "switchFailed": "전환 실패",
-    "switchError": "네코를 전환하는 동안 오류가 발생했습니다."
+    "switchError": "네코를 전환하는 동안 오류가 발생했습니다.",
+    "freePresetVoices": "── 무료 사전 설정 음색 ──"
   },
   "app": {
     "welcomeBack": "{{name}}이 돌아왔습니다!",

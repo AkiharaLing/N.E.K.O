@@ -32,6 +32,11 @@ class VRMInteraction {
         this.mouseEnterHandler = null;
         this.dragHandler = null;
         this.wheelHandler = null;
+        this.mouseHoverHandler = null;  // 鼠标悬停时动态更新光标
+
+        // 射线检测（用于判断鼠标是否在模型上）
+        this._raycaster = THREE ? new THREE.Raycaster() : null;
+        this._mouseNDC = THREE ? new THREE.Vector2() : null;
 
         // 鼠标跟踪相关
         this.mouseTrackingEnabled = false;
@@ -71,6 +76,25 @@ class VRMInteraction {
         if (window.DragHelpers) {
             window.DragHelpers.restoreButtonPointerEvents();
         }
+    }
+
+    /**
+     * 射线检测：判断屏幕坐标 (clientX, clientY) 是否命中 VRM 模型
+     * @returns {boolean} 是否命中
+     */
+    _hitTestModel(clientX, clientY) {
+        if (!this._raycaster || !this.manager.camera || !this.manager.currentModel?.scene) {
+            return false;
+        }
+        const canvas = this.manager.renderer?.domElement;
+        if (!canvas) return false;
+        const rect = canvas.getBoundingClientRect();
+        // 转换为 NDC 坐标 (-1 ~ 1)
+        this._mouseNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        this._mouseNDC.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        this._raycaster.setFromCamera(this._mouseNDC, this.manager.camera);
+        const intersects = this._raycaster.intersectObject(this.manager.currentModel.scene, true);
+        return intersects.length > 0;
     }
 
     /**
@@ -141,6 +165,10 @@ class VRMInteraction {
             }
 
             if (e.button === 0 || e.button === 1) { // 左键或中键
+                // 只有点击到模型才开始拖拽（射线检测）
+                if (!this._hitTestModel(e.clientX, e.clientY)) {
+                    return; // 未命中模型，不拦截事件
+                }
                 this.isDragging = true;
                 this.dragMode = 'pan';
                 this.previousMousePosition = { x: e.clientX, y: e.clientY };
@@ -179,7 +207,7 @@ class VRMInteraction {
                     e.stopPropagation();
                     this.isDragging = false;
                     this.dragMode = null;
-                    canvas.style.cursor = 'grab';
+                    canvas.style.cursor = 'default';
                     // 恢复按钮的 pointer-events
                     this._restoreButtonPointerEvents();
                 }
@@ -290,7 +318,7 @@ class VRMInteraction {
                 e.stopPropagation();
                 this.isDragging = false;
                 this.dragMode = null;
-                canvas.style.cursor = 'grab';
+                canvas.style.cursor = 'default';
 
                 // 拖拽结束后恢复按钮的 pointer-events
                 this._restoreButtonPointerEvents();
@@ -305,7 +333,19 @@ class VRMInteraction {
 
         // 5. 鼠标进入
         this.mouseEnterHandler = () => {
-            canvas.style.cursor = 'grab';
+            if (!this.isDragging) {
+                canvas.style.cursor = 'default';
+            }
+        };
+
+        // 5.5 鼠标悬停时动态更新光标（不拖拽时检测是否在模型上）
+        this.mouseHoverHandler = (e) => {
+            if (this.isDragging || this.checkLocked()) return;
+            if (this._hitTestModel(e.clientX, e.clientY)) {
+                canvas.style.cursor = 'grab';
+            } else {
+                canvas.style.cursor = 'default';
+            }
         };
 
         // 6. 滚轮缩放
@@ -380,6 +420,7 @@ class VRMInteraction {
         document.addEventListener('mousemove', this.dragHandler); // 绑定到 document 以支持拖出画布
         document.addEventListener('mouseup', this.mouseUpHandler);
         canvas.addEventListener('mouseenter', this.mouseEnterHandler);
+        canvas.addEventListener('mousemove', this.mouseHoverHandler); // 动态光标（悬停检测）
         // 保存 wheel 监听器选项，确保添加和移除时使用相同的选项
         this._wheelListenerOptions = { passive: false, capture: true };
         canvas.addEventListener('wheel', this.wheelHandler, this._wheelListenerOptions);
@@ -456,7 +497,7 @@ class VRMInteraction {
             this.isDragging = false;
             this.dragMode = null;
             if (this.manager.renderer) {
-                this.manager.renderer.domElement.style.cursor = 'grab';
+                this.manager.renderer.domElement.style.cursor = 'default';
             }
             // 恢复按钮的 pointer-events
             this._restoreButtonPointerEvents();
@@ -524,6 +565,10 @@ class VRMInteraction {
         if (this.mouseEnterHandler) {
             canvas.removeEventListener('mouseenter', this.mouseEnterHandler);
             this.mouseEnterHandler = null;
+        }
+        if (this.mouseHoverHandler) {
+            canvas.removeEventListener('mousemove', this.mouseHoverHandler);
+            this.mouseHoverHandler = null;
         }
         if (this.wheelHandler) {
             // 移除时必须使用与添加时相同的选项，否则 removeEventListener 不会生效

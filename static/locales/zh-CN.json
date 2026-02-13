@@ -970,7 +970,9 @@
     "deleting": "删除中...",
     "deleteSuccess": "音色\"{{name}}\"已成功删除",
     "deleteFailed": "删除失败",
-    "deleteError": "删除失败：{{error}}"
+    "deleteError": "删除失败：{{error}}",
+    "freePresetLabel": "免费预设音色",
+    "freePresetBadge": "预设"
   },
   "memory": {
     "title": "记忆整理",
@@ -1094,7 +1096,8 @@
     "unregisterFailed": "解除注册失败",
     "unregisterError": "解除注册时发生错误",
     "switchFailed": "切换失败",
-    "switchError": "切换猫娘时发生错误"
+    "switchError": "切换猫娘时发生错误",
+    "freePresetVoices": "免费预设音色"
   },
   "emotion": {
     "manager": "Live2D 情感映射管理器",

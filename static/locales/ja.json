@@ -952,7 +952,9 @@
     "deleting": "削除中...",
     "deleteSuccess": "削除成功",
     "deleteFailed": "削除失敗",
-    "deleteError": "削除失敗：{{error}}"
+    "deleteError": "削除失敗：{{error}}",
+    "freePresetLabel": "無料プリセット",
+    "freePresetBadge": "プリセット"
   },
   "settings": {
     "menu": {
@@ -1125,7 +1127,8 @@
     "unregisterFailed": "登録解除に失敗しました",
     "unregisterError": "登録解除中にエラーが発生しました",
     "switchFailed": "切り替えに失敗しました",
-    "switchError": "neko の切り替え中にエラーが発生しました"
+    "switchError": "neko の切り替え中にエラーが発生しました",
+    "freePresetVoices": "── 無料プリセット音色 ──"
   },
   "app": {
     "welcomeBack": "{{name}}が戻りました！",

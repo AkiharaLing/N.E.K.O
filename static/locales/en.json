@@ -952,7 +952,9 @@
     "deleting": "Deleting...",
     "deleteSuccess": "Voice \"{{name}}\" has been successfully deleted",
     "deleteFailed": "Delete failed",
-    "deleteError": "Delete failed: {{error}}"
+    "deleteError": "Delete failed: {{error}}",
+    "freePresetLabel": "Free Preset Voices",
+    "freePresetBadge": "Preset"
   },
   "memory": {
     "title": "Memory Browser",
@@ -1076,7 +1078,8 @@
     "unregisterFailed": "Failed to unregister",
     "unregisterError": "An error occurred while unregistering",
     "switchFailed": "Switch failed",
-    "switchError": "An error occurred while switching neko"
+    "switchError": "An error occurred while switching neko",
+    "freePresetVoices": "Free Preset Voices"
   },
   "app": {
     "welcomeBack": "{{name}} is back!",
