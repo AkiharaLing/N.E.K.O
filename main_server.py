@@ -37,7 +37,7 @@ import logging # noqa
 from fastapi import FastAPI # noqa
 from fastapi.staticfiles import StaticFiles # noqa
 from main_logic import core as core, cross_server as cross_server # noqa
-from main_logic.agent_event_bus import MainServerAgentBridge, set_main_bridge # noqa
+from main_logic.agent_event_bus import MainServerAgentBridge, notify_analyze_ack, set_main_bridge # noqa
 from fastapi.templating import Jinja2Templates # noqa
 from threading import Thread, Event as ThreadEvent # noqa
 from queue import Queue # noqa
@@ -166,13 +166,45 @@ agent_event_bridge: MainServerAgentBridge | None = None
 async def _handle_agent_event(event: dict):
     """Receive events from agent_server via ZeroMQ and fan out to core/websocket."""
     try:
+        event_type = event.get("event_type")
         lanlan = event.get("lanlan_name")
+
+        if event_type == "analyze_ack":
+            logger.info(
+                "[EventBus] analyze_ack received on main: event_id=%s lanlan=%s",
+                event.get("event_id"),
+                lanlan,
+            )
+            notify_analyze_ack(str(event.get("event_id") or ""))
+            return
+
+        # Agent status updates may be broadcast (lanlan_name omitted).
+        if event_type == "agent_status_update":
+            payload = {
+                "type": "agent_status_update",
+                "snapshot": event.get("snapshot", {}),
+            }
+            if lanlan and lanlan in session_manager:
+                mgr = session_manager.get(lanlan)
+                if mgr and mgr.websocket and hasattr(mgr.websocket, "send_json"):
+                    try:
+                        await mgr.websocket.send_json(payload)
+                    except Exception:
+                        pass
+            else:
+                for mgr in session_manager.values():
+                    if mgr and mgr.websocket and hasattr(mgr.websocket, "send_json"):
+                        try:
+                            await mgr.websocket.send_json(payload)
+                        except Exception:
+                            pass
+            return
+
         if not lanlan or lanlan not in session_manager:
             return
         mgr = session_manager.get(lanlan)
         if not mgr:
             return
-        event_type = event.get("event_type")
         if event_type in ("task_result", "proactive_message"):
             text = (event.get("text") or "").strip()
             if text:
@@ -306,7 +338,7 @@ async def initialize_character_data():
             try:
                 sync_process[k] = Thread(
                     target=cross_server.sync_connector_process,
-                    args=(sync_message_queue[k], sync_shutdown_event[k], k, f"ws://localhost:{MONITOR_SERVER_PORT}", {'bullet': False, 'monitor': True}),
+                    args=(sync_message_queue[k], sync_shutdown_event[k], k, f"ws://127.0.0.1:{MONITOR_SERVER_PORT}", {'bullet': False, 'monitor': True}),
                     daemon=True,
                     name=f"SyncConnector-{k}"
                 )
@@ -724,7 +756,7 @@ async def shutdown_server_async():
         # 向memory_server发送关闭信号
         try:
             from config import MEMORY_SERVER_PORT
-            shutdown_url = f"http://localhost:{MEMORY_SERVER_PORT}/shutdown"
+            shutdown_url = f"http://127.0.0.1:{MEMORY_SERVER_PORT}/shutdown"
             async with httpx.AsyncClient(timeout=1) as client:
                 response = await client.post(shutdown_url)
                 if response.status_code == 200:
@@ -787,6 +819,60 @@ def find_preview_image_in_folder(folder_path):
     # 如果找不到指定的图片名称，返回None
     return None
 
+
+def _get_port_owners(port: int) -> list[int]:
+    """查询监听指定端口的进程 PID 列表（尽力而为）。"""
+    pids: set[int] = set()
+    try:
+        import subprocess
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            needle = f":{port}"
+            for raw in result.stdout.splitlines():
+                line = raw.strip()
+                if "LISTENING" not in line or needle not in line:
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                pid_str = parts[-1]
+                if pid_str.isdigit():
+                    pids.add(int(pid_str))
+        else:
+            result = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            for line in result.stdout.splitlines():
+                s = line.strip()
+                if s.isdigit():
+                    pids.add(int(s))
+    except Exception:
+        pass
+    return sorted(pids)
+
+
+def _is_port_available(port: int) -> bool:
+    """检查 127.0.0.1:port 是否可绑定。"""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
 # --- Run the Server ---
 if __name__ == "__main__":
     import uvicorn
@@ -817,6 +903,13 @@ if __name__ == "__main__":
     
     # Add filter to httpx logger for availability check requests
     logging.getLogger("httpx").addFilter(create_httpx_filter())
+
+    # 启动前预检端口，避免 uvicorn 启动后立刻退出且日志不明显
+    if not _is_port_available(MAIN_SERVER_PORT):
+        owner_pids = _get_port_owners(MAIN_SERVER_PORT)
+        owner_hint = f"，占用PID: {owner_pids}" if owner_pids else ""
+        logger.error(f"启动失败：端口 {MAIN_SERVER_PORT} 已被占用{owner_hint}")
+        raise SystemExit(1)
 
     # 1) 配置 UVicorn
     config = uvicorn.Config(

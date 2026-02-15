@@ -425,6 +425,25 @@ function init_app() {
 
         socket.onopen = () => {
             console.log(window.t('console.websocketConnected'));
+            // Warm up Agent snapshot once websocket is ready.
+            Promise.all([
+                fetch('/api/agent/health').then(r => r.ok).catch(() => false),
+                fetch('/api/agent/flags').then(r => r.ok ? r.json() : null).catch(() => null)
+            ]).then(([healthOk, flagsResp]) => {
+                if (flagsResp && flagsResp.success) {
+                    window._agentStatusSnapshot = {
+                        server_online: !!healthOk,
+                        analyzer_enabled: !!flagsResp.analyzer_enabled,
+                        flags: flagsResp.agent_flags || {},
+                        agent_api_gate: flagsResp.agent_api_gate || {},
+                        capabilities: (window._agentStatusSnapshot && window._agentStatusSnapshot.capabilities) || {},
+                        updated_at: new Date().toISOString()
+                    };
+                    if (window.agentStateMachine && typeof window.agentStateMachine.updateCache === 'function') {
+                        window.agentStateMachine.updateCache(!!healthOk, flagsResp.agent_flags || {});
+                    }
+                }
+            }).catch(() => {});
 
             // 启动心跳保活机制
             if (heartbeatInterval) {
@@ -789,6 +808,17 @@ function init_app() {
                         fn();
                     } else {
                         console.warn(window.t('console.unknownExpressionCommand'), response.message);
+                    }
+                } else if (response.type === 'agent_status_update') {
+                    const snapshot = response.snapshot || {};
+                    window._agentStatusSnapshot = snapshot;
+                    const serverOnline = snapshot.server_online !== false;
+                    const flags = snapshot.flags || {};
+                    if (window.agentStateMachine && typeof window.agentStateMachine.updateCache === 'function') {
+                        window.agentStateMachine.updateCache(serverOnline, flags);
+                    }
+                    if (typeof window.applyAgentStatusSnapshotToUI === 'function') {
+                        window.applyAgentStatusSnapshotToUI(snapshot);
                     }
                 } else if (response.type === 'agent_notification') {
                     const msg = typeof response.text === 'string' ? response.text : '';
@@ -5624,6 +5654,7 @@ function init_app() {
 
     // 暴露状态机给外部使用
     window.agentStateMachine = agentStateMachine;
+    window._agentStatusSnapshot = window._agentStatusSnapshot || null;
 
     // Agent 定时检查器（暴露到 window 供 live2d-ui-hud.js 调用）
     let agentCheckInterval = null;
@@ -5951,7 +5982,7 @@ function init_app() {
 
     // 启动 Agent 可用性定时检查（由 Agent 总开关打开时调用）
     window.startAgentAvailabilityCheck = function () {
-        // 推送架构下不再使用轮询，只做一次检查
+        // 事件驱动：不做轮询，仅做一次性检查。
         if (agentCheckInterval) {
             clearInterval(agentCheckInterval);
             agentCheckInterval = null;
@@ -5964,8 +5995,6 @@ function init_app() {
 
         // 立即检查一次
         checkAgentCapabilities();
-
-        // no-op: event-driven
     };
 
     // 停止 Agent 可用性定时检查（由 Agent 总开关关闭时调用）
@@ -5986,13 +6015,19 @@ function init_app() {
 
     // 检查Agent服务器健康状态
     async function checkToolServerHealth() {
-        try {
-            const resp = await fetch(`/api/agent/health`);
-            if (!resp.ok) throw new Error('not ok');
-            return true;
-        } catch (e) {
-            return false;
+        // 兼容服务启动竞态：首次失败时做短重试，避免必须手动刷新。
+        for (let i = 0; i < 3; i++) {
+            try {
+                const resp = await fetch(`/api/agent/health`);
+                if (resp.ok) return true;
+            } catch (e) {
+                // continue retry
+            }
+            if (i < 2) {
+                await new Promise(resolve => setTimeout(resolve, 350));
+            }
         }
+        return false;
     }
 
     // 检查Agent能力
@@ -6025,6 +6060,17 @@ function init_app() {
     // 连接Agent弹出框中的开关到Agent控制逻辑
     // 使用事件监听替代固定延迟，确保在浮动按钮创建完成后才绑定事件
     const setupAgentCheckboxListeners = () => {
+        // Agent UI v2: fully event-driven single-store controller.
+        // Keep legacy logic as fallback only when v2 is unavailable.
+        if (typeof window.initAgentUiV2 === 'function') {
+            try {
+                window.initAgentUiV2();
+                return;
+            } catch (e) {
+                console.warn('[App] initAgentUiV2 failed, fallback to legacy agent UI:', e);
+            }
+        }
+
         const agentMasterCheckbox = document.getElementById('live2d-agent-master');
         const agentKeyboardCheckbox = document.getElementById('live2d-agent-keyboard');
         const agentMcpCheckbox = document.getElementById('live2d-agent-mcp');
@@ -6055,6 +6101,74 @@ function init_app() {
                 checkbox._updateStyle();
             }
         };
+
+        const applyAgentStatusSnapshotToUI = (snapshot) => {
+            if (!snapshot || agentStateMachine.getState() === AgentPopupState.PROCESSING) return;
+            const serverOnline = snapshot.server_online !== false;
+            const flags = snapshot.flags || {};
+            const analyzerEnabled = !!snapshot.analyzer_enabled;
+            const caps = snapshot.capabilities || {};
+
+            agentStateMachine.updateCache(serverOnline, flags);
+
+            if (!serverOnline) {
+                agentStateMachine.transition(AgentPopupState.OFFLINE, 'snapshot offline');
+                if (agentMasterCheckbox) {
+                    agentMasterCheckbox.checked = false;
+                    agentMasterCheckbox.disabled = true;
+                    syncCheckboxUI(agentMasterCheckbox);
+                }
+                resetSubCheckboxes();
+                setFloatingAgentStatus(window.t ? window.t('settings.toggles.serverOffline') : 'Agent服务器未启动');
+                return;
+            }
+
+            agentStateMachine.transition(AgentPopupState.ONLINE, 'snapshot online');
+            if (agentMasterCheckbox) {
+                agentMasterCheckbox.disabled = false;
+                agentMasterCheckbox.checked = analyzerEnabled;
+                agentMasterCheckbox.title = window.t ? window.t('settings.toggles.agentMaster') : 'Agent总开关';
+                syncCheckboxUI(agentMasterCheckbox);
+            }
+
+            if (!analyzerEnabled) {
+                resetSubCheckboxes();
+                setFloatingAgentStatus(window.t ? window.t('agent.status.ready') : 'Agent服务器就绪');
+                return;
+            }
+
+            const applySub = (cb, enabled, ready, name) => {
+                if (!cb) return;
+                const hasReady = typeof ready === 'boolean';
+                cb.disabled = hasReady ? !ready : false;
+                cb.checked = !!enabled && (hasReady ? !!ready : true);
+                cb.title = cb.disabled
+                    ? (window.t ? window.t('settings.toggles.unavailable', { name }) : `${name}不可用`)
+                    : name;
+                syncCheckboxUI(cb);
+            };
+
+            applySub(
+                agentKeyboardCheckbox,
+                flags.computer_use_enabled,
+                caps.computer_use_ready,
+                window.t ? window.t('settings.toggles.keyboardControl') : '键鼠控制'
+            );
+            applySub(
+                agentMcpCheckbox,
+                flags.mcp_enabled,
+                caps.mcp_ready,
+                window.t ? window.t('settings.toggles.mcpTools') : 'MCP工具'
+            );
+            applySub(
+                agentUserPluginCheckbox,
+                flags.user_plugin_enabled,
+                caps.user_plugin_ready,
+                window.t ? window.t('settings.toggles.userPlugin') : '用户插件'
+            );
+            setFloatingAgentStatus(window.t ? window.t('agent.status.enabled') : 'Agent模式已开启');
+        };
+        window.applyAgentStatusSnapshotToUI = applyAgentStatusSnapshotToUI;
 
         // 辅助函数：重置子开关状态和 UI
         const resetSubCheckboxes = () => {
@@ -6532,6 +6646,17 @@ function init_app() {
             // 使用状态机管理弹窗状态
             agentStateMachine.openPopup();
             isAgentPopupOpen = true;
+
+            // 优先使用后端推送快照秒开渲染，避免每次先卡在“连接中”。
+            if (window._agentStatusSnapshot) {
+                applyAgentStatusSnapshotToUI(window._agentStatusSnapshot);
+                setTimeout(() => {
+                    if (agentStateMachine._popupOpen) {
+                        checkAgentCapabilities();
+                    }
+                }, 0);
+                return;
+            }
 
             // 【状态机控制】如果正在处理用户操作，不进行检查
             if (agentStateMachine.getState() === AgentPopupState.PROCESSING) {

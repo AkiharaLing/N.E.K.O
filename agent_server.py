@@ -6,6 +6,7 @@ mimetypes.add_type("application/javascript", ".js")
 import asyncio
 import uuid
 import logging
+import time
 from typing import Dict, Any, Optional
 from datetime import datetime
 import time
@@ -59,6 +60,60 @@ class Modules:
     # 使用统一的速率限制日志记录器（业务逻辑层面）
     throttled_logger: "ThrottledLogger" = None  # 延迟初始化
     agent_bridge: AgentServerEventBridge | None = None
+    state_revision: int = 0
+    capability_cache: Dict[str, Dict[str, Any]] = {
+        "computer_use": {"ready": False, "reason": "not checked"},
+        "mcp": {"ready": False, "reason": "not checked"},
+        "browser_use": {"ready": False, "reason": "not checked"},
+        "user_plugin": {"ready": False, "reason": "not checked"},
+    }
+
+
+def _rewire_computer_use_dependents() -> None:
+    """Keep planner/task_executor in sync after computer_use adapter refresh."""
+    try:
+        if Modules.task_executor is not None and hasattr(Modules.task_executor, "computer_use"):
+            Modules.task_executor.computer_use = Modules.computer_use
+    except Exception:
+        pass
+    try:
+        if Modules.planner is not None and hasattr(Modules.planner, "computer_use"):
+            Modules.planner.computer_use = Modules.computer_use
+    except Exception:
+        pass
+
+
+def _try_refresh_computer_use_adapter(force: bool = False) -> bool:
+    """
+    Best-effort refresh for computer-use adapter.
+    Useful when API key/model settings were fixed after agent_server startup.
+    """
+    current = Modules.computer_use
+    if not force and current is not None and getattr(current, "init_ok", False):
+        return True
+    try:
+        refreshed = ComputerUseAdapter()
+        Modules.computer_use = refreshed
+        _rewire_computer_use_dependents()
+        if getattr(refreshed, "init_ok", False):
+            logger.info("[Agent] ComputerUse adapter refreshed successfully")
+            return True
+        logger.warning("[Agent] ComputerUse adapter refresh completed but still not ready")
+        return False
+    except Exception as e:
+        logger.warning(f"[Agent] ComputerUse adapter refresh failed: {e}")
+        return False
+
+
+def _bump_state_revision() -> int:
+    Modules.state_revision += 1
+    return Modules.state_revision
+
+
+def _set_capability(name: str, ready: bool, reason: str = "") -> None:
+    Modules.capability_cache[name] = {"ready": bool(ready), "reason": reason or ""}
+
+
 def _collect_existing_task_descriptions(lanlan_name: Optional[str] = None) -> list[tuple[str, str]]:
     """Return list of (task_id, description) for queued/running tasks, optionally filtered by lanlan_name."""
     items: list[tuple[str, str]] = []
@@ -186,17 +241,80 @@ def _check_agent_api_gate() -> Dict[str, Any]:
 async def _emit_main_event(event_type: str, lanlan_name: Optional[str], **payload) -> None:
     event = {"event_type": event_type, "lanlan_name": lanlan_name, **payload}
     if Modules.agent_bridge:
-        sent = await Modules.agent_bridge.emit_to_main(event)
-        if sent:
-            return
+        try:
+            sent = await asyncio.wait_for(Modules.agent_bridge.emit_to_main(event), timeout=0.6)
+            if sent:
+                return
+            if event_type == "analyze_ack":
+                logger.info(
+                    "[AgentAnalyze] analyze_ack emit failed: lanlan=%s event_id=%s",
+                    lanlan_name,
+                    payload.get("event_id"),
+                )
+        except Exception as e:
+            if event_type == "analyze_ack":
+                logger.info(
+                    "[AgentAnalyze] analyze_ack emit exception: lanlan=%s event_id=%s error=%s",
+                    lanlan_name,
+                    payload.get("event_id"),
+                    e,
+                )
+
+
+def _collect_agent_status_snapshot() -> Dict[str, Any]:
+    gate = _check_agent_api_gate()
+    flags = dict(Modules.agent_flags or {})
+    capabilities = dict(Modules.capability_cache or {})
+    return {
+        "revision": Modules.state_revision,
+        "server_online": True,
+        "analyzer_enabled": bool(Modules.analyzer_enabled),
+        "flags": flags,
+        "gate": gate,
+        "capabilities": capabilities,
+        "updated_at": _now_iso(),
+    }
+
+
+async def _emit_agent_status_update(lanlan_name: Optional[str] = None) -> None:
+    try:
+        snapshot = _collect_agent_status_snapshot()
+        await _emit_main_event(
+            "agent_status_update",
+            lanlan_name,
+            snapshot=snapshot,
+        )
+    except Exception:
+        pass
 
 
 async def _on_session_event(event: Dict[str, Any]) -> None:
     if (event or {}).get("event_type") == "analyze_request":
         messages = event.get("messages", [])
         lanlan_name = event.get("lanlan_name")
+        event_id = event.get("event_id")
+        logger.info("[AgentAnalyze] analyze_request received: trigger=%s lanlan=%s messages=%d", event.get("trigger"), lanlan_name, len(messages) if isinstance(messages, list) else 0)
+        if event_id:
+            asyncio.create_task(_emit_main_event("analyze_ack", lanlan_name, event_id=event_id))
         if isinstance(messages, list) and messages:
             asyncio.create_task(_background_analyze_and_plan(messages, lanlan_name))
+
+
+@app.post("/agent/analyze_request")
+async def analyze_request(payload: Dict[str, Any]):
+    messages = (payload or {}).get("messages") or []
+    lanlan_name = (payload or {}).get("lanlan_name")
+    trigger = (payload or {}).get("trigger") or "unknown"
+    if not isinstance(messages, list) or not messages:
+        return {"success": False, "error": "messages required"}
+    logger.info(
+        "[AgentAnalyze] analyze_request http received: trigger=%s lanlan=%s messages=%d",
+        trigger,
+        lanlan_name,
+        len(messages),
+    )
+    asyncio.create_task(_background_analyze_and_plan(messages, lanlan_name))
+    return {"success": True}
 
 
 def _spawn_task(kind: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -363,6 +481,8 @@ async def _background_analyze_and_plan(messages: list[dict[str, Any]], lanlan_na
         return
     
     try:
+        logger.info("[AgentAnalyze] background analyze start: lanlan=%s messages=%d flags=%s analyzer_enabled=%s",
+                    lanlan_name, len(messages), Modules.agent_flags, Modules.analyzer_enabled)
         # testUserPlugin: log before analysis when user_plugin_enabled is true
         try:
             if Modules.agent_flags.get("user_plugin_enabled", False):
@@ -495,6 +615,22 @@ async def startup():
     # 保留 planner/analyzer 以支持能力探测与后台分析开关
     Modules.planner = TaskPlanner(computer_use=Modules.computer_use)
     Modules.analyzer = ConversationAnalyzer()
+    _rewire_computer_use_dependents()
+    # Prime capability cache cheaply at startup
+    try:
+        if Modules.computer_use:
+            cu = Modules.computer_use.is_available()
+            reasons = cu.get("reasons", []) if isinstance(cu, dict) else []
+            _set_capability("computer_use", bool(cu.get("ready")) if isinstance(cu, dict) else False, reasons[0] if reasons else "")
+    except Exception:
+        _set_capability("computer_use", False, "Computer Use check failed")
+    try:
+        if Modules.browser_use:
+            bu = Modules.browser_use.is_available()
+            reasons = bu.get("reasons", []) if isinstance(bu, dict) else []
+            _set_capability("browser_use", bool(bu.get("ready")) if isinstance(bu, dict) else False, reasons[0] if reasons else "")
+    except Exception:
+        _set_capability("browser_use", False, "Browser Use check failed")
     
     # Warm up router discovery
     try:
@@ -506,7 +642,7 @@ async def startup():
         import httpx
 
         async def _http_plugin_provider(force_refresh: bool = False):
-            url = f"http://localhost:{USER_PLUGIN_SERVER_PORT}/plugins"
+            url = f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugins"
             if force_refresh:
                 url += "?refresh=true"
             try:
@@ -543,6 +679,9 @@ async def startup():
         await Modules.agent_bridge.start()
     except Exception as e:
         logger.warning(f"[Agent] Event bridge startup failed: {e}")
+    # Push initial server status so frontend can render Agent popup without waiting.
+    _bump_state_revision()
+    await _emit_agent_status_update()
     
     logger.info("[Agent] ✅ Agent server started with simplified task executor")
 
@@ -663,24 +802,38 @@ async def get_agent_flags():
         "agent_flags": Modules.agent_flags,
         "analyzer_enabled": Modules.analyzer_enabled,
         "agent_api_gate": _check_agent_api_gate(),
+        "revision": Modules.state_revision,
         "notification": note
     }
 
 
+@app.get("/agent/state")
+async def get_agent_state():
+    snapshot = _collect_agent_status_snapshot()
+    return {"success": True, "snapshot": snapshot}
+
+
 @app.post("/agent/flags")
 async def set_agent_flags(payload: Dict[str, Any]):
+    lanlan_name = (payload or {}).get("lanlan_name")
     mf = (payload or {}).get("mcp_enabled")
     cf = (payload or {}).get("computer_use_enabled")
     bf = (payload or {}).get("browser_use_enabled")
     uf = (payload or {}).get("user_plugin_enabled")
     # Agent API gate: if any agent sub-feature is being enabled, gate must pass.
     gate = _check_agent_api_gate()
+    changed = False
+    old_flags = dict(Modules.agent_flags)
+    old_analyzer_enabled = bool(Modules.analyzer_enabled)
     if gate.get("ready") is not True and any(x is True for x in (mf, cf, bf, uf)):
         Modules.agent_flags["mcp_enabled"] = False
         Modules.agent_flags["computer_use_enabled"] = False
         Modules.agent_flags["browser_use_enabled"] = False
         Modules.agent_flags["user_plugin_enabled"] = False
         Modules.notification = f"无法开启 Agent: {(gate.get('reasons') or ['Agent API 未配置'])[0]}"
+        if Modules.agent_flags != old_flags:
+            _bump_state_revision()
+            await _emit_agent_status_update(lanlan_name=lanlan_name)
         return {"success": True, "agent_flags": Modules.agent_flags}
 
     prev_up = Modules.agent_flags.get("user_plugin_enabled", False)
@@ -697,12 +850,15 @@ async def set_agent_flags(payload: Dict[str, Any]):
                     # Check actual availability
                     caps = await Modules.planner.refresh_capabilities(force_refresh=False)
                     if caps:
+                        _set_capability("mcp", True, "")
                         Modules.agent_flags["mcp_enabled"] = True
                     else:
+                        _set_capability("mcp", False, "MCP router unreachable or no servers discovered")
                         Modules.agent_flags["mcp_enabled"] = False
                         Modules.notification = "无法开启 MCP: 未发现可用工具或 Router 未连接"
                         logger.warning("[Agent] Cannot enable MCP: No capabilities found")
                 except Exception as e:
+                    _set_capability("mcp", False, str(e))
                     Modules.agent_flags["mcp_enabled"] = False
                     Modules.notification = f"开启 MCP 失败: {str(e)}"
                     logger.error(f"[Agent] Cannot enable MCP: Check failed {e}")
@@ -712,6 +868,9 @@ async def set_agent_flags(payload: Dict[str, Any]):
     # 2. Handle Computer Use Flag with Capability Check
     if isinstance(cf, bool):
         if cf: # Attempting to enable
+            # If startup happened before API config was ready, try self-heal once.
+            if (not Modules.computer_use) or (not getattr(Modules.computer_use, "init_ok", False)):
+                _try_refresh_computer_use_adapter(force=True)
             if not Modules.computer_use:
                 Modules.agent_flags["computer_use_enabled"] = False
                 Modules.notification = "无法开启 Computer Use: 模块未加载"
@@ -719,6 +878,8 @@ async def set_agent_flags(payload: Dict[str, Any]):
             else:
                 try:
                     avail = Modules.computer_use.is_available()
+                    reasons = avail.get('reasons', []) if isinstance(avail, dict) else []
+                    _set_capability("computer_use", bool(avail.get("ready")) if isinstance(avail, dict) else False, reasons[0] if reasons else "")
                     if avail.get("ready"):
                         Modules.agent_flags["computer_use_enabled"] = True
                     else:
@@ -742,6 +903,8 @@ async def set_agent_flags(payload: Dict[str, Any]):
             else:
                 try:
                     avail = Modules.browser_use.is_available()
+                    reasons = avail.get('reasons', []) if isinstance(avail, dict) else []
+                    _set_capability("browser_use", bool(avail.get("ready")) if isinstance(avail, dict) else False, reasons[0] if reasons else "")
                     if avail.get("ready"):
                         Modules.agent_flags["browser_use_enabled"] = True
                     else:
@@ -761,6 +924,7 @@ async def set_agent_flags(payload: Dict[str, Any]):
                 async with httpx.AsyncClient(timeout=1.0) as client:
                     r = await client.get(f"http://localhost:{USER_PLUGIN_SERVER_PORT}/plugins")
                     if r.status_code != 200:
+                        _set_capability("user_plugin", False, f"user_plugin server responded {r.status_code}")
                         Modules.agent_flags["user_plugin_enabled"] = False
                         Modules.notification = "无法开启 UserPlugin: 插件服务不可用"
                         logger.warning("[Agent] Cannot enable UserPlugin: service unavailable")
@@ -768,15 +932,19 @@ async def set_agent_flags(payload: Dict[str, Any]):
                     data = r.json()
                     plugins = data.get("plugins", []) if isinstance(data, dict) else []
                     if not plugins:
+                        _set_capability("user_plugin", False, "未发现可用插件")
                         Modules.agent_flags["user_plugin_enabled"] = False
                         Modules.notification = "无法开启 UserPlugin: 未发现可用插件"
                         logger.warning("[Agent] Cannot enable UserPlugin: no plugins found")
                         return {"success": True, "agent_flags": Modules.agent_flags}
             except Exception as e:
+                _set_capability("user_plugin", False, str(e))
                 Modules.agent_flags["user_plugin_enabled"] = False
                 Modules.notification = f"开启 UserPlugin 失败: {str(e)}"
                 logger.error(f"[Agent] Cannot enable UserPlugin: {e}")
                 return {"success": True, "agent_flags": Modules.agent_flags}
+        if uf:
+            _set_capability("user_plugin", True, "")
         Modules.agent_flags["user_plugin_enabled"] = uf
 
     # testUserPlugin: log when user_plugin_enabled toggles
@@ -790,7 +958,55 @@ async def set_agent_flags(payload: Dict[str, Any]):
     except Exception:
         pass
 
+    changed = Modules.agent_flags != old_flags or bool(Modules.analyzer_enabled) != old_analyzer_enabled
+    if changed:
+        _bump_state_revision()
+    await _emit_agent_status_update(lanlan_name=lanlan_name)
     return {"success": True, "agent_flags": Modules.agent_flags}
+
+
+@app.post("/agent/command")
+async def agent_command(payload: Dict[str, Any]):
+    t0 = time.perf_counter()
+    request_id = (payload or {}).get("request_id") or str(uuid.uuid4())
+    command = (payload or {}).get("command")
+    lanlan_name = (payload or {}).get("lanlan_name")
+    if command == "set_agent_enabled":
+        enabled = bool((payload or {}).get("enabled"))
+        if enabled:
+            Modules.analyzer_enabled = True
+            Modules.analyzer_profile = (payload or {}).get("profile", {}) or {}
+        else:
+            Modules.analyzer_enabled = False
+            Modules.analyzer_profile = {}
+            Modules.agent_flags["mcp_enabled"] = False
+            Modules.agent_flags["computer_use_enabled"] = False
+            Modules.agent_flags["browser_use_enabled"] = False
+            Modules.agent_flags["user_plugin_enabled"] = False
+            await admin_control({"action": "end_all"})
+        _bump_state_revision()
+        await _emit_agent_status_update(lanlan_name=lanlan_name)
+        total_ms = round((time.perf_counter() - t0) * 1000, 2)
+        logger.info("[AgentTiming] request_id=%s command=%s total_ms=%s", request_id, command, total_ms)
+        return {"success": True, "request_id": request_id, "timing": {"agent_total_ms": total_ms}}
+    if command == "set_flag":
+        key = (payload or {}).get("key")
+        value = bool((payload or {}).get("value"))
+        if key not in {"mcp_enabled", "computer_use_enabled", "browser_use_enabled", "user_plugin_enabled"}:
+            raise HTTPException(400, "invalid flag key")
+        t_set = time.perf_counter()
+        await set_agent_flags({"lanlan_name": lanlan_name, key: value})
+        set_ms = round((time.perf_counter() - t_set) * 1000, 2)
+        total_ms = round((time.perf_counter() - t0) * 1000, 2)
+        logger.info("[AgentTiming] request_id=%s command=%s key=%s set_flags_ms=%s total_ms=%s", request_id, command, key, set_ms, total_ms)
+        return {"success": True, "request_id": request_id, "timing": {"set_flags_ms": set_ms, "agent_total_ms": total_ms}}
+    if command == "refresh_state":
+        snapshot = _collect_agent_status_snapshot()
+        await _emit_agent_status_update(lanlan_name=lanlan_name)
+        total_ms = round((time.perf_counter() - t0) * 1000, 2)
+        logger.info("[AgentTiming] request_id=%s command=%s total_ms=%s", request_id, command, total_ms)
+        return {"success": True, "request_id": request_id, "snapshot": snapshot, "timing": {"agent_total_ms": total_ms}}
+    raise HTTPException(400, "unknown command")
 
 
 @app.get("/computer_use/availability")
@@ -799,13 +1015,20 @@ async def computer_use_availability():
     if gate.get("ready") is not True:
         return {"ready": False, "reasons": gate.get("reasons", ["Agent API 未配置"])}
     if not Modules.computer_use:
+        # Try to recover adapter lazily when gate is already satisfied.
+        _try_refresh_computer_use_adapter(force=True)
+    if not Modules.computer_use:
         # Auto-update flag if module missing
         if Modules.agent_flags.get("computer_use_enabled"):
             Modules.agent_flags["computer_use_enabled"] = False
             Modules.notification = "Computer Use 模块未加载，已自动关闭"
         raise HTTPException(503, "ComputerUse not ready")
+    if not getattr(Modules.computer_use, "init_ok", False):
+        _try_refresh_computer_use_adapter(force=True)
     
     status = Modules.computer_use.is_available()
+    reasons = status.get("reasons", []) if isinstance(status, dict) else []
+    _set_capability("computer_use", bool(status.get("ready")) if isinstance(status, dict) else False, reasons[0] if reasons else "")
     
     # Auto-update flag if capability lost
     if not status.get("ready") and Modules.agent_flags.get("computer_use_enabled"):
@@ -823,7 +1046,10 @@ async def browser_use_availability():
         return {"ready": False, "reasons": gate.get("reasons", ["Agent API 未配置"])}
     if not Modules.browser_use:
         raise HTTPException(503, "BrowserUse not ready")
-    return Modules.browser_use.is_available()
+    status = Modules.browser_use.is_available()
+    reasons = status.get("reasons", []) if isinstance(status, dict) else []
+    _set_capability("browser_use", bool(status.get("ready")) if isinstance(status, dict) else False, reasons[0] if reasons else "")
+    return status
 
 
 @app.post("/computer_use/run")
@@ -884,6 +1110,7 @@ async def mcp_availability():
         count = len(caps or {})
         ready = count > 0
         reasons = [] if ready else ["MCP router unreachable or no servers discovered"]
+        _set_capability("mcp", ready, reasons[0] if reasons else "")
         
         # Auto-update flag if capability lost
         if not ready and Modules.agent_flags.get("mcp_enabled"):
@@ -904,6 +1131,7 @@ async def mcp_availability():
         return {"ready": ready, "capabilities_count": count, "reasons": reasons}
     except Exception as e:
         logger.error(f"[MCP] Availability check failed: {e}")
+        _set_capability("mcp", False, str(e))
         return {"ready": False, "capabilities_count": 0, "reasons": [str(e)]}
 
 

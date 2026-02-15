@@ -22,11 +22,9 @@ if getattr(sys, 'frozen', False):
         # Nuitka 或其他
         bundle_dir = os.path.dirname(os.path.abspath(__file__))
     
-    app_dir = os.path.dirname(sys.executable)
 else:
     # 运行在正常 Python 环境
     bundle_dir = os.path.dirname(os.path.abspath(__file__))
-    app_dir = bundle_dir
 
 sys.path.insert(0, bundle_dir)
 os.chdir(bundle_dir)
@@ -39,57 +37,56 @@ import itertools
 import ctypes
 import atexit
 import signal
+import json
+from datetime import datetime, timezone
 from typing import Dict
 from multiprocessing import Process, freeze_support, Event
-from config import MAIN_SERVER_PORT, MEMORY_SERVER_PORT, TOOL_SERVER_PORT
+from config import APP_NAME, MAIN_SERVER_PORT, MEMORY_SERVER_PORT, TOOL_SERVER_PORT
 
 JOB_HANDLE = None
 _cleanup_lock = threading.Lock()
 _cleanup_done = False
-LOG_FILE_PATH = None
-_log_file_handle = None
+DEFAULT_PORTS = {
+    "MAIN_SERVER_PORT": MAIN_SERVER_PORT,
+    "MEMORY_SERVER_PORT": MEMORY_SERVER_PORT,
+    "TOOL_SERVER_PORT": TOOL_SERVER_PORT,
+}
+INTERNAL_DEFAULT_PORTS = {
+    "AGENT_MQ_PORT": 48917,
+    "MAIN_AGENT_EVENT_PORT": 48918,
+}
+# Keep this range reserved for known N.E.K.O defaults so fallback
+# does not collide with other companion services.
+AVOID_FALLBACK_PORTS = set(range(48911, 48919))
 
 
-class TeeStream:
-    """将输出同时写入原始流和日志文件。"""
-    def __init__(self, original_stream, log_stream):
-        self.original_stream = original_stream
-        self.log_stream = log_stream
-
-    def write(self, data):
-        self.original_stream.write(data)
-        self.log_stream.write(data)
-        return len(data)
-
-    def flush(self):
-        self.original_stream.flush()
-        self.log_stream.flush()
-
-    def __getattr__(self, item):
-        return getattr(self.original_stream, item)
-
-
-def setup_file_logging():
-    """将控制台输出复制到日志文件，便于 Steam 环境排查。"""
-    global LOG_FILE_PATH, _log_file_handle
-    if LOG_FILE_PATH:
+def _show_error_dialog(message: str):
+    """在 Windows 打包场景显示错误弹窗。"""
+    if sys.platform != 'win32':
         return
-
     try:
-        log_dir = os.path.join(app_dir, "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        LOG_FILE_PATH = os.path.join(log_dir, "launcher.log")
-        _log_file_handle = open(LOG_FILE_PATH, "a", encoding="utf-8", errors="replace", buffering=1)
+        ctypes.windll.user32.MessageBoxW(None, message, f"{APP_NAME} 启动失败", 0x10)
+    except Exception:
+        pass
 
-        if not isinstance(sys.stdout, TeeStream):
-            sys.stdout = TeeStream(sys.stdout, _log_file_handle)
-        if not isinstance(sys.stderr, TeeStream):
-            sys.stderr = TeeStream(sys.stderr, _log_file_handle)
 
-        print(f"[Launcher] Logging to: {LOG_FILE_PATH}", flush=True)
-    except Exception as e:
-        # 日志初始化失败不应阻止主流程
-        print(f"[Launcher] Warning: Failed to initialize file logging: {e}", flush=True)
+def emit_frontend_event(event_type: str, payload: dict | None = None):
+    """Emit machine-readable event line for Electron stdout parser."""
+    envelope = {
+        "source": "neko_launcher",
+        "event": event_type,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "payload": payload or {},
+    }
+    print(f"NEKO_EVENT {json.dumps(envelope, ensure_ascii=True, separators=(',', ':'))}", flush=True)
+
+
+def report_startup_failure(message: str, show_dialog: bool = True):
+    """统一报告启动失败信息：终端 + （可选）弹窗。"""
+    print(message, flush=True)
+    emit_frontend_event("startup_failure", {"message": message})
+    if show_dialog and getattr(sys, 'frozen', False):
+        _show_error_dialog(message)
 
 
 def _get_last_error() -> int:
@@ -391,6 +388,176 @@ def check_port(port: int, timeout: float = 0.5) -> bool:
     except: # noqa
         return False
 
+
+def get_port_owners(port: int) -> list[int]:
+    """查询监听指定端口的进程 PID 列表（尽力而为）。"""
+    pids: set[int] = set()
+    try:
+        if sys.platform == 'win32':
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            needle = f":{port}"
+            for raw in result.stdout.splitlines():
+                line = raw.strip()
+                if "LISTENING" not in line or needle not in line:
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                pid_str = parts[-1]
+                if pid_str.isdigit():
+                    pids.add(int(pid_str))
+        else:
+            result = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            for line in result.stdout.splitlines():
+                s = line.strip()
+                if s.isdigit():
+                    pids.add(int(s))
+    except Exception:
+        pass
+    return sorted(pids)
+
+
+def _is_port_bindable(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _pick_fallback_port(preferred_port: int, reserved: set[int]) -> int | None:
+    # 1) Prefer nearby ports first
+    for port in range(preferred_port + 1, min(preferred_port + 101, 65535)):
+        if port in reserved or port in AVOID_FALLBACK_PORTS:
+            continue
+        if _is_port_bindable(port):
+            return port
+    # 2) Fallback to any OS-assigned free port
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+        sock.close()
+        if port not in reserved and port not in AVOID_FALLBACK_PORTS:
+            return port
+    except Exception:
+        pass
+    return None
+
+
+def apply_port_strategy() -> bool:
+    """Keep default ports when possible; auto-avoid conflicts when needed."""
+    global MAIN_SERVER_PORT, MEMORY_SERVER_PORT, TOOL_SERVER_PORT
+    chosen: dict[str, int] = {}
+    chosen_internal: dict[str, int] = {}
+    fallback_details: list[dict] = []
+    internal_fallback_details: list[dict] = []
+    reserved: set[int] = set()
+
+    for key in ("MEMORY_SERVER_PORT", "TOOL_SERVER_PORT", "MAIN_SERVER_PORT"):
+        preferred = int(DEFAULT_PORTS[key])
+        if preferred not in reserved and _is_port_bindable(preferred):
+            chosen[key] = preferred
+            reserved.add(preferred)
+            continue
+
+        owners = get_port_owners(preferred)
+        fallback = _pick_fallback_port(preferred, reserved)
+        if fallback is None:
+            report_startup_failure(
+                f"Startup failed: no fallback port available for {key} (preferred={preferred}, owners={owners})"
+            )
+            return False
+
+        chosen[key] = fallback
+        reserved.add(fallback)
+        fallback_details.append(
+            {
+                "port_key": key,
+                "preferred": preferred,
+                "selected": fallback,
+                "owners": owners,
+            }
+        )
+
+    MAIN_SERVER_PORT = chosen["MAIN_SERVER_PORT"]
+    MEMORY_SERVER_PORT = chosen["MEMORY_SERVER_PORT"]
+    TOOL_SERVER_PORT = chosen["TOOL_SERVER_PORT"]
+
+    for key, preferred in INTERNAL_DEFAULT_PORTS.items():
+        if preferred not in reserved and _is_port_bindable(preferred):
+            chosen_internal[key] = preferred
+            reserved.add(preferred)
+            continue
+
+        owners = get_port_owners(preferred)
+        fallback = _pick_fallback_port(preferred, reserved)
+        if fallback is None:
+            report_startup_failure(
+                f"Startup failed: no fallback port available for {key} (preferred={preferred}, owners={owners})"
+            )
+            return False
+
+        chosen_internal[key] = fallback
+        reserved.add(fallback)
+        internal_fallback_details.append(
+            {
+                "port_key": key,
+                "preferred": preferred,
+                "selected": fallback,
+                "owners": owners,
+            }
+        )
+
+    for key, value in chosen.items():
+        os.environ[f"NEKO_{key}"] = str(value)
+    for key, value in chosen_internal.items():
+        os.environ[f"NEKO_{key}"] = str(value)
+
+    for server in SERVERS:
+        if server["module"] == "memory_server":
+            server["port"] = MEMORY_SERVER_PORT
+        elif server["module"] == "agent_server":
+            server["port"] = TOOL_SERVER_PORT
+        elif server["module"] == "main_server":
+            server["port"] = MAIN_SERVER_PORT
+
+    emit_frontend_event(
+        "port_plan",
+        {
+            "defaults": DEFAULT_PORTS,
+            "selected": chosen,
+            "internal_defaults": INTERNAL_DEFAULT_PORTS,
+            "internal_selected": chosen_internal,
+            "fallbacks": fallback_details,
+            "internal_fallbacks": internal_fallback_details,
+            "fallback_applied": bool(fallback_details or internal_fallback_details),
+        },
+    )
+    if fallback_details or internal_fallback_details:
+        print(
+            f"[Launcher] Port fallback applied: public={fallback_details}, internal={internal_fallback_details}",
+            flush=True,
+        )
+    else:
+        print("[Launcher] Preferred ports available; no fallback needed.", flush=True)
+    return True
+
 def show_spinner(stop_event: threading.Event, message: str = "正在启动服务器"):
     """显示转圈圈动画"""
     spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
@@ -405,6 +572,13 @@ def show_spinner(stop_event: threading.Event, message: str = "正在启动服务
 def start_server(server: Dict) -> bool:
     """启动单个服务器"""
     try:
+        port = server.get('port')
+        if isinstance(port, int) and check_port(port):
+            owner_pids = get_port_owners(port)
+            owner_suffix = f", owner_pids={owner_pids}" if owner_pids else ""
+            report_startup_failure(f"Start failed: {server['name']} port {port} already in use{owner_suffix}")
+            return False
+
         # 根据模块名选择启动函数
         if server['module'] == 'memory_server':
             target_func = run_memory_server
@@ -413,7 +587,7 @@ def start_server(server: Dict) -> bool:
         elif server['module'] == 'main_server':
             target_func = run_main_server
         else:
-            print(f"✗ {server['name']} 未知模块", flush=True)
+            report_startup_failure(f"Start failed: {server['name']} has unknown module")
             return False
         
         # 创建进程间同步事件
@@ -427,7 +601,7 @@ def start_server(server: Dict) -> bool:
         print(f"✓ {server['name']} 已启动 (PID: {server['process'].pid})", flush=True)
         return True
     except Exception as e:
-        print(f"✗ {server['name']} 启动失败: {e}", flush=True)
+        report_startup_failure(f"Start failed: {server['name']} exception: {e}")
         return False
 
 def wait_for_servers(timeout: int = 60) -> bool:
@@ -447,7 +621,7 @@ def wait_for_servers(timeout: int = 60) -> bool:
     while time.time() - start_time < timeout:
         ready_count = 0
         for server in SERVERS:
-            if check_port(server['port']) or server['port']==TOOL_SERVER_PORT:
+            if check_port(server['port']):
                 ready_count += 1
         
         if ready_count == len(SERVERS):
@@ -486,6 +660,7 @@ def wait_for_servers(timeout: int = 60) -> bool:
         print("✗ 服务器启动超时，请检查日志文件", flush=True)
         print("=" * 60, flush=True)
         print("\n", flush=True)
+        report_startup_failure("Startup timeout: at least one service did not become ready")
         # 显示未就绪的服务器
         for server in SERVERS:
             if not server['ready_event'].is_set():
@@ -562,7 +737,8 @@ def main():
     """主函数"""
     # 支持 multiprocessing 在 Windows 上的打包
     freeze_support()
-    setup_file_logging()
+    if not apply_port_strategy():
+        return 1
     register_shutdown_hooks()
     
     # 创建 Job Object，确保主进程被 kill 时子进程也会被终止
@@ -583,12 +759,14 @@ def main():
         
         if not all_started:
             print("\n启动失败，正在清理...", flush=True)
+            report_startup_failure("Startup aborted: at least one service failed to start", show_dialog=False)
             cleanup_servers()
             return 1
         
         # 2. 等待服务器准备就绪
         if not wait_for_servers():
             print("\n启动失败，正在清理...", flush=True)
+            report_startup_failure("Startup aborted: services did not become ready before timeout", show_dialog=False)
             cleanup_servers()
             return 1
         
@@ -598,7 +776,7 @@ def main():
         print("  🎉 所有服务器已启动完成！", flush=True)
         print("\n  现在你可以：", flush=True)
         print("  1. 启动 lanlan_frd.exe 使用系统", flush=True)
-        print("  2. 在浏览器访问 http://localhost:48911", flush=True)
+        print(f"  2. 在浏览器访问 http://localhost:{MAIN_SERVER_PORT}", flush=True)
         print("\n  按 Ctrl+C 关闭所有服务器", flush=True)
         print("=" * 60, flush=True)
         print("", flush=True)
@@ -619,6 +797,7 @@ def main():
         print("\n\n收到中断信号，正在关闭...", flush=True)
     except Exception as e:
         print(f"\n发生错误: {e}", flush=True)
+        report_startup_failure(f"Launcher unhandled exception: {e}")
     finally:
         cleanup_servers()
         print("\n所有服务器已关闭", flush=True)

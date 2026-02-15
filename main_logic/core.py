@@ -21,6 +21,7 @@ from main_logic.omni_offline_client import OmniOfflineClient
 from main_logic.tts_client import get_tts_worker
 from config import MEMORY_SERVER_PORT
 from utils.config_manager import get_config_manager
+from utils.api_config_loader import get_free_voices
 from utils.language_utils import normalize_language_code
 from threading import Thread
 from queue import Queue
@@ -82,8 +83,13 @@ class LLMSessionManager:
         self.core_api_type = realtime_config.get('api_type', '') or self._config_manager.get_core_config().get('CORE_API_TYPE', '')
         self.memory_server_port = MEMORY_SERVER_PORT
         self.audio_api_key = self._config_manager.get_core_config()['AUDIO_API_KEY']  # 用于CosyVoice自定义音色
-        self._locked_at_default_voice = bool(self.core_api_type == "free" and "lanlan.app" in realtime_config.get('base_url', ''))
-        self.voice_id = self.lanlan_basic_config[self.lanlan_name].get('voice_id', '') if not self._locked_at_default_voice else ''
+        raw_voice_id = self.lanlan_basic_config[self.lanlan_name].get('voice_id', '')
+        if self._should_block_free_preset_voice(raw_voice_id, realtime_config.get('base_url', '')):
+            self.voice_id = ''
+            self._is_free_preset_voice = False
+        else:
+            self.voice_id = raw_voice_id
+            self._is_free_preset_voice = self._is_preset_voice_id(self.voice_id)
         # 注意：use_tts 会在 start_session 中根据 input_mode 重新设置
         self.use_tts = False
         self.generation_config = {}  # Qwen暂时不用
@@ -628,6 +634,20 @@ class LLMSessionManager:
             self.is_flushing_hot_swap_cache = False
 
     
+    def _is_preset_voice_id(self, voice_id: str) -> bool:
+        """判断 voice_id 是否属于免费 preset 列表。"""
+        if not voice_id:
+            return False
+        return voice_id in set(get_free_voices().values())
+
+    def _should_block_free_preset_voice(self, voice_id: str, realtime_base_url: str) -> bool:
+        """lanlan.app/free 下仅屏蔽 preset 音色，不影响 custom 音色。"""
+        return bool(
+            self.core_api_type == "free"
+            and "lanlan.app" in (realtime_base_url or "")
+            and self._is_preset_voice_id(voice_id)
+        )
+
     def normalize_text(self, text): # 对文本进行基本预处理
         text = text.strip()
         text = text.replace("\n", "")
@@ -672,15 +692,16 @@ class LLMSessionManager:
         self.audio_api_key = self._config_manager.get_core_config()['AUDIO_API_KEY']
         
         # 重新读取角色配置以获取最新的voice_id（支持角色切换后的音色热更新）
-        _,_,_,lanlan_basic_config_updated,_,_,_,_,_,_ = self._config_manager.get_character_data()
+        _, _, _, self.lanlan_basic_config, _, _, _, _, _, _ = self._config_manager.get_character_data()
         old_voice_id = self.voice_id
-        self._locked_at_default_voice = bool(self.core_api_type == "free" and "lanlan.app" in realtime_config.get('base_url', ''))
-        self.voice_id = self.lanlan_basic_config[self.lanlan_name].get('voice_id', '') if not self._locked_at_default_voice else ''
-        
-        # 判断是否为免费预设音色（来自 api_providers.json 的 free_voices）
-        from utils.api_config_loader import get_free_voices
-        free_voices = get_free_voices()
-        self._is_free_preset_voice = bool(self.voice_id and self.voice_id in free_voices.values())
+        raw_voice_id = self.lanlan_basic_config[self.lanlan_name].get('voice_id', '')
+        block_free_preset = self._should_block_free_preset_voice(raw_voice_id, realtime_config.get('base_url', ''))
+        if block_free_preset:
+            self.voice_id = ''
+            self._is_free_preset_voice = False
+        else:
+            self.voice_id = raw_voice_id
+            self._is_free_preset_voice = self._is_preset_voice_id(self.voice_id)
         
         # 如果角色没有设置 voice_id，尝试使用自定义API配置的 TTS_VOICE_ID 作为回退
         if not self.voice_id:
@@ -690,6 +711,7 @@ class LLMSessionManager:
             if core_config.get('ENABLE_CUSTOM_API') and tts_voice_id and not tts_voice_id.startswith('__gptsovits_disabled__'):
                 self.voice_id = tts_voice_id
                 logger.info(f"🔄 使用自定义TTS回退音色: '{self.voice_id}'")
+                self._is_free_preset_voice = False
         
         if old_voice_id != self.voice_id:
             logger.info(f"🔄 voice_id已更新: '{old_voice_id}' -> '{self.voice_id}'")
@@ -862,7 +884,7 @@ class LLMSessionManager:
             # 连接 Memory Server 获取记忆上下文
             try:
                 async with httpx.AsyncClient(timeout=2.0) as client:
-                    resp = await client.get(f"http://localhost:{self.memory_server_port}/new_dialog/{self.lanlan_name}")
+                    resp = await client.get(f"http://127.0.0.1:{self.memory_server_port}/new_dialog/{self.lanlan_name}")
                     initial_prompt += resp.text + f"========以上为前情概要。现在请{self.lanlan_name}准备，即将开始用语音与{self.master_name}继续对话。========\n"
             except httpx.ConnectError:
                 raise ConnectionError(f"❌ 记忆服务未启动！请先启动记忆服务 (端口 {self.memory_server_port})")
@@ -1125,10 +1147,16 @@ class LLMSessionManager:
             self.audio_api_key = self._config_manager.get_core_config()['AUDIO_API_KEY']
             
             # 重新读取角色配置以获取最新的voice_id（支持角色切换后的音色热更新）
-            _,_,_,lanlan_basic_config_updated,_,_,_,_,_,_ = self._config_manager.get_character_data()
+            _, _, _, self.lanlan_basic_config, _, _, _, _, _, _ = self._config_manager.get_character_data()
             old_voice_id = self.voice_id
-            self._locked_at_default_voice = bool(self.core_api_type == "free" and "lanlan.app" in realtime_config.get('base_url', ''))
-            self.voice_id = self.lanlan_basic_config[self.lanlan_name].get('voice_id', '') if not self._locked_at_default_voice else ''
+            raw_voice_id = self.lanlan_basic_config[self.lanlan_name].get('voice_id', '')
+            block_free_preset = self._should_block_free_preset_voice(raw_voice_id, realtime_config.get('base_url', ''))
+            if block_free_preset:
+                self.voice_id = ''
+                self._is_free_preset_voice = False
+            else:
+                self.voice_id = raw_voice_id
+                self._is_free_preset_voice = self._is_preset_voice_id(self.voice_id)
             
             # 如果角色没有设置 voice_id，尝试使用自定义API配置的 TTS_VOICE_ID 作为回退
             if not self.voice_id:
@@ -1138,6 +1166,7 @@ class LLMSessionManager:
                 if core_config.get('ENABLE_CUSTOM_API') and tts_voice_id and not tts_voice_id.startswith('__gptsovits_disabled__'):
                     self.voice_id = tts_voice_id
                     logger.info(f"🔄 热切换准备: 使用自定义TTS回退音色: '{self.voice_id}'")
+                    self._is_free_preset_voice = False
             
             if old_voice_id != self.voice_id:
                 logger.info(f"🔄 热切换准备: voice_id已更新: '{old_voice_id}' -> '{self.voice_id}'")
@@ -1188,7 +1217,7 @@ class LLMSessionManager:
             initial_prompt = (f"你是一个角色扮演大师，并且精通电脑操作。请按要求扮演以下角色（{self.lanlan_name}），在对方请求时、回答“我试试”并尝试操纵电脑。" if self._is_agent_enabled() else f"你是一个角色扮演大师。请按要求扮演以下角色（{self.lanlan_name}）。") + self.lanlan_prompt
             self.initial_cache_snapshot_len = len(self.message_cache_for_new_session)
             async with httpx.AsyncClient() as client:
-                resp = await client.get(f"http://localhost:{self.memory_server_port}/new_dialog/{self.lanlan_name}")
+                resp = await client.get(f"http://127.0.0.1:{self.memory_server_port}/new_dialog/{self.lanlan_name}")
                 initial_prompt += resp.text + self._convert_cache_to_str(self.message_cache_for_new_session)
             # print(initial_prompt)
             await self.pending_session.connect(initial_prompt, native_audio = not self.use_tts)

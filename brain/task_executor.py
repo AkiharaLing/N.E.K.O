@@ -7,7 +7,7 @@ DirectTaskExecutor: 合并 Analyzer + Planner 的功能
 import json
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional, Tuple, Callable, Awaitable
+from typing import Dict, Any, List, Optional, Callable, Awaitable
 from dataclasses import dataclass
 from openai import AsyncOpenAI, APIConnectionError, InternalServerError, RateLimitError
 import httpx
@@ -117,7 +117,7 @@ class DirectTaskExecutor:
         # fallback to built-in HTTP fetcher
         if (self.plugin_list == []) or force_refresh:
             try:
-                url = f"http://localhost:{USER_PLUGIN_SERVER_PORT}/plugins"
+                url = f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugins"
                 # increase timeout and avoid awaiting a non-awaitable .json()
                 timeout = httpx.Timeout(5.0, connect=2.0)
                 async with httpx.AsyncClient(timeout=timeout) as _client:
@@ -152,7 +152,16 @@ class DirectTaskExecutor:
     
     def _format_messages(self, messages: List[Dict[str, str]]) -> str:
         """格式化对话消息"""
+        latest_user_text = ""
+        for m in reversed(messages[-10:]):
+            if m.get('role') == 'user':
+                latest_user_text = (m.get('text') or '').strip()
+                if latest_user_text:
+                    break
         lines = []
+        if latest_user_text:
+            # Explicitly surface latest user intent to avoid being shadowed by assistant claims.
+            lines.append(f"LATEST_USER_REQUEST: {latest_user_text}")
         for m in messages[-10:]:  # 最多取最近10条
             role = m.get('role', 'user')
             text = m.get('text', '')
@@ -206,6 +215,7 @@ INSTRUCTIONS:
 2. If yes, determine if ANY of the available MCP tools can handle it
 3. If a tool can handle it, provide the exact tool name and arguments
 4. Be precise with the tool arguments - they must match the tool's schema
+5. If `LATEST_USER_REQUEST` exists, prioritize it over assistant claims like "already done".
 
 OUTPUT FORMAT (strict JSON):
 {{
@@ -303,6 +313,7 @@ INSTRUCTIONS:
 2. Determine if the task REQUIRES GUI interaction (e.g., opening apps, clicking buttons, web browsing)
 3. Tasks like "open Chrome", "click on X", "type something" require GUI
 4. Tasks that can be done via API/tools (file operations, data queries) do NOT need GUI
+5. If `LATEST_USER_REQUEST` exists, prioritize it over assistant claims like "already done".
 
 OUTPUT FORMAT (strict JSON):
 {
@@ -930,7 +941,7 @@ Return only the JSON object, nothing else.
                 reason=getattr(up_decision, "reason", "") or "Plugin not found"
             )
         # Route via /plugin/trigger; use separate top-level entry_id when provided
-        trigger_endpoint = f"http://localhost:{USER_PLUGIN_SERVER_PORT}/plugin/trigger"
+        trigger_endpoint = f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugin/trigger"
         trigger_body = {"task_id": task_id, "plugin_id": plugin_id, "args": plugin_args or {}}
         if plugin_entry_id:
             trigger_body["entry_id"] = plugin_entry_id
