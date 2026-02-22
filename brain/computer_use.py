@@ -377,7 +377,8 @@ class ComputerUseAdapter:
                 return
 
             self._llm_client = OpenAI(
-                base_url=base_url, api_key=api_key, timeout=60.0,
+                base_url=base_url, api_key=api_key, timeout=45.0,
+                max_retries=0,
             )
 
             # Connectivity test (via langchain for compatibility with extra_body)

@@ -25,6 +25,7 @@ class TaskDeduper:
             base_url=api_config['base_url'],
             api_key=api_config['api_key'],
             temperature=0,
+            max_retries=0,
             extra_body=get_extra_body(api_config['model']) or None
         )
 

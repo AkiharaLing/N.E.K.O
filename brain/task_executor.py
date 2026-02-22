@@ -142,7 +142,8 @@ class DirectTaskExecutor:
         api_config = self._config_manager.get_model_api_config('summary')
         return AsyncOpenAI(
             api_key=api_config['api_key'],
-            base_url=api_config['base_url']
+            base_url=api_config['base_url'],
+            max_retries=0
         )
     
     def _get_model(self):

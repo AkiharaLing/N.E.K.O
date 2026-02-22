@@ -132,7 +132,8 @@ async def analyze_image_with_vision_model(
 
         client = AsyncOpenAI(
             api_key=vision_api_key,
-            base_url=vision_base_url if vision_base_url else None
+            base_url=vision_base_url if vision_base_url else None,
+            max_retries=0,
         )
         
         if window_title:
@@ -217,18 +218,14 @@ async def analyze_screenshot_from_data_url(data_url: str, window_title: str = ''
                 logger.error("无效的图片数据")
                 return None
             
-            # 如果不是JPEG格式，转换为JPEG
-            if not data_url.startswith('data:image/jpeg'):
-                logger.info(f"将图片从其他格式转换为JPEG: {image.size[0]}x{image.size[1]}")
-                buffer = BytesIO()
-                # 确保转换为RGB模式（JPEG不支持透明通道）
-                if image.mode in ('RGBA', 'LA', 'P'):
-                    image = image.convert('RGB')
-                image.save(buffer, format='JPEG', quality=85)
-                buffer.seek(0)
-                base64_data = base64.b64encode(buffer.read()).decode('utf-8')
-            
-            logger.info(f"截图验证成功: {image.size[0]}x{image.size[1]}")
+            # 统一压缩为 JPEG（含 resize）
+            if image.mode in ('RGBA', 'LA', 'P'):
+                image = image.convert('RGB')
+            orig_w, orig_h = image.size
+            jpg_bytes = compress_screenshot(image, target_h=COMPRESS_TARGET_HEIGHT, quality=COMPRESS_JPEG_QUALITY)
+            base64_data = base64.b64encode(jpg_bytes).decode('utf-8')
+            new_size = len(jpg_bytes)
+            logger.info(f"截图验证成功: {orig_w}x{orig_h} → 压缩后 {new_size//1024}KB")
         except Exception as e:
             logger.error(f"图片数据解码/验证失败: {e}")
             return None

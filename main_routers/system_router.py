@@ -12,10 +12,12 @@ Handles system-related endpoints including:
 import os
 import sys
 import asyncio
+import base64
 import logging
 import re
 import time
 from collections import deque
+from io import BytesIO
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Request
@@ -28,11 +30,21 @@ import httpx
 
 from .shared_state import get_steamworks, get_config_manager, get_sync_message_queue, get_session_manager
 from config import get_extra_body, MEMORY_SERVER_PORT
-from config.prompts_sys import emotion_analysis_prompt, get_proactive_chat_prompt, get_proactive_chat_rewrite_prompt
+from config.prompts_sys import (
+    emotion_analysis_prompt,
+    get_proactive_screen_prompt, get_proactive_generate_prompt, get_proactive_chat_rewrite_prompt,
+)
 from utils.workshop_utils import get_workshop_path
-from utils.screenshot_utils import analyze_screenshot_from_data_url
+from utils.screenshot_utils import analyze_screenshot_from_data_url, compress_screenshot, COMPRESS_TARGET_HEIGHT, COMPRESS_JPEG_QUALITY
 from utils.language_utils import detect_language, translate_text, normalize_language_code, get_global_language
 from utils.frontend_utils import count_words_and_chars
+from utils.web_scraper import (
+    fetch_trending_content, format_trending_content,
+    fetch_window_context_content, format_window_context_content,
+    fetch_video_content, format_video_content,
+    fetch_news_content, format_news_content,
+    fetch_personal_dynamics, format_personal_dynamics,
+)
 
 router = APIRouter(prefix="/api", tags=["system"])
 logger = logging.getLogger("Main")
@@ -97,64 +109,107 @@ def _extract_links_from_raw(mode: str, raw_data: dict) -> list[dict]:
 
 def _parse_web_screening_result(text: str) -> dict | None:
     """
-    解析 Phase 1 Web 筛选 LLM 的结构化结果，提取链接信息。
+    解析 Phase 1 Web 筛选 LLM 的结构化结果。
     期望格式：
+      序号：N / No: N
       话题：xxx / Topic: xxx
       来源：xxx / Source: xxx
-      链接：xxx / Link: xxx
       简述：xxx / Summary: xxx
+    返回 dict(title, source, number) 或 None
     """
     result = {}
-    # 多语言 key 匹配
     patterns = {
         'title': r'(?:话题|Topic|話題|주제)\s*[：:]\s*(.+)',
         'source': r'(?:来源|Source|出典|출처)\s*[：:]\s*(.+)',
-        'url': r'(?:链接|Link|リンク|링크)\s*[：:]\s*(https?://\S+)',
+        'number': r'(?:序号|No|番号|번호)\.?\s*[：:]\s*(\d+)',
     }
     for key, pattern in patterns.items():
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             result[key] = match.group(1).strip()
     
-    if result.get('url'):
+    if result.get('title'):
         return result
     return None
 
 
+def _lookup_link_by_title(title: str, all_links: list[dict]) -> dict | None:
+    """根据 Phase 1 输出的标题在 all_web_links 中查找对应链接"""
+    title_lower = title.lower().strip()
+    for link in all_links:
+        link_title = link.get('title', '').lower().strip()
+        if not link_title:
+            continue
+        if link_title == title_lower or link_title in title_lower or title_lower in link_title:
+            return link
+    return None
+
+
 def _format_recent_proactive_chats(lanlan_name: str, lang: str = 'zh') -> str:
-    """将近期搭话记录格式化为可注入prompt的文本段"""
+    """将近期搭话记录格式化为可注入prompt的文本段（含相对时间和来源通道）"""
     history = _proactive_chat_history.get(lanlan_name)
     if not history:
         return ""
     now = time.time()
-    recent = [(ts, msg) for ts, msg in history if now - ts < _RECENT_CHAT_MAX_AGE_SECONDS]
+    recent = [entry for entry in history if now - entry[0] < _RECENT_CHAT_MAX_AGE_SECONDS]
     if not recent:
         return ""
-    
+
+    _time_labels = {
+        'zh': {0: '刚刚', 'm': '{}分钟前', 'h': '{}小时前'},
+        'en': {0: 'just now', 'm': '{}min ago', 'h': '{}h ago'},
+        'ja': {0: 'たった今', 'm': '{}分前', 'h': '{}時間前'},
+        'ko': {0: '방금', 'm': '{}분 전', 'h': '{}시간 전'},
+    }
+    _ch_labels = {
+        'zh': {'vision': '屏幕', 'web': '网络'},
+        'en': {'vision': 'screen', 'web': 'web'},
+        'ja': {'vision': '画面', 'web': 'ネット'},
+        'ko': {'vision': '화면', 'web': '웹'},
+    }
+    tl = _time_labels.get(lang, _time_labels['zh'])
+    cl = _ch_labels.get(lang, _ch_labels['zh'])
+
+    def _rel(ts):
+        d = int(now - ts)
+        if d < 60:
+            return tl[0]
+        m = d // 60
+        if m < 60:
+            return tl['m'].format(m)
+        return tl['h'].format(m // 60)
+
     headers = {
-        'zh': '======以下是你近期的主动搭话记录（不要重复这些内容）======',
-        'en': '======Your recent proactive chats (do NOT repeat these)======',
-        'ja': '======あなたの最近の自発的発言記録（繰り返さないでください）======',
-        'ko': '======최근 주도적 대화 기록 (이 내용을 반복하지 마세요)======',
+        'zh': '======近期搭话记录======\n以下是你最近主动搭话时说过的话。新的搭话务必避免与这些内容雷同（包括话题、句式和语气）：',
+        'en': '======Recent Proactive Chats======\nBelow are things you recently said when proactively chatting. Your new message MUST avoid being similar to any of these (topic, phrasing, and tone):',
+        'ja': '======最近の自発的発言記録======\n以下はあなたが最近自発的に話しかけた内容です。新しい発言はこれらと類似しないように（話題・言い回し・トーンすべて）：',
+        'ko': '======최근 주도적 대화 기록======\n아래는 최근 주도적으로 대화를 건넨 내용입니다. 새 메시지는 이들과 유사하지 않아야 합니다 (주제, 문체, 톤 모두):',
     }
     footers = {
-        'zh': '======以上为近期搭话记录======',
-        'en': '======End recent proactive chats======',
-        'ja': '======以上、最近の発言記録======',
-        'ko': '======이상 최근 대화 기록======',
+        'zh': '======搭话记录结束======',
+        'en': '======End Recent Chats======',
+        'ja': '======発言記録ここまで======',
+        'ko': '======대화 기록 끝======',
     }
-    
+
     header = headers.get(lang, headers['zh'])
     footer = footers.get(lang, footers['zh'])
-    lines = [f"- {msg}" for _, msg in recent]
+    lines = []
+    for entry in recent:
+        ts, msg = entry[0], entry[1]
+        ch = entry[2] if len(entry) > 2 else ''
+        tag = _rel(ts)
+        if ch:
+            tag += f"·{cl.get(ch, ch)}"
+        lines.append(f"- [{tag}] {msg}")
     return f"\n{header}\n" + "\n".join(lines) + f"\n{footer}\n"
 
 
-def _record_proactive_chat(lanlan_name: str, message: str):
-    """记录一次成功的主动搭话"""
+def _record_proactive_chat(lanlan_name: str, message: str, channel: str = ''):
+    """记录一次成功的主动搭话（附带来源通道）"""
     if lanlan_name not in _proactive_chat_history:
         _proactive_chat_history[lanlan_name] = deque(maxlen=10)
-    _proactive_chat_history[lanlan_name].append((time.time(), message))
+    _proactive_chat_history[lanlan_name].append((time.time(), message, channel))
 
 
 def _is_path_within_base(base_dir: str, candidate_path: str) -> bool:
@@ -958,13 +1013,6 @@ async def proactive_chat(request: Request):
     try:
         _config_manager = get_config_manager()
         session_manager = get_session_manager()
-        from utils.web_scraper import (
-            fetch_window_context_content, format_window_context_content,
-            fetch_video_content, format_video_content,
-            fetch_news_content, format_news_content,
-            fetch_personal_dynamics, format_personal_dynamics
-        )
-        from config.prompts_sys import get_proactive_screen_prompt, get_proactive_generate_prompt, get_proactive_chat_rewrite_prompt
         # 获取当前角色数据（包括完整人设）
         master_name_current, her_name_current, _, _, _, lanlan_prompt_map, _, _, _, _ = _config_manager.get_character_data()
         
@@ -1015,13 +1063,30 @@ async def proactive_chat(request: Request):
             """获取单个信息源，返回 (mode, content_dict) 或抛出异常"""
             if mode == 'vision':
                 if not has_screenshot:
-                    raise ValueError("无截图数据")
-                screenshot_content = await analyze_screenshot_from_data_url(screenshot_data)
-                if not screenshot_content:
-                    raise ValueError("截图分析失败")
-                logger.info(f"[{lanlan_name}] 成功分析截图内容")
+                    raise ValueError("无截图数据（screenshot_data 为空或类型不正确）")
                 window_title = data.get('window_title', '')
-                return (mode, {'screenshot_content': screenshot_content, 'window_title': window_title})
+                logger.debug(f"[{lanlan_name}] Vision 通道: 开始分析截图 (data长度={len(screenshot_data)}, 窗口={window_title!r})")
+                try:
+                    screenshot_content = await analyze_screenshot_from_data_url(screenshot_data, window_title=window_title)
+                except Exception as e:
+                    raise ValueError(f"截图分析异常: {type(e).__name__}: {e}") from e
+                if not screenshot_content:
+                    raise ValueError("截图分析返回空结果")
+                # 压缩截图供 Phase 2 vision 模型直接使用
+                compressed_b64 = ''
+                try:
+                    from PIL import Image as _PILImage
+                    _, b64_raw = screenshot_data.split(',', 1)
+                    img = _PILImage.open(BytesIO(base64.b64decode(b64_raw)))
+                    if img.mode in ('RGBA', 'LA', 'P'):
+                        img = img.convert('RGB')
+                    jpg_bytes = compress_screenshot(img, target_h=COMPRESS_TARGET_HEIGHT, quality=COMPRESS_JPEG_QUALITY)
+                    compressed_b64 = base64.b64encode(jpg_bytes).decode('utf-8')
+                    logger.info(f"[{lanlan_name}] Vision 通道: 截图分析成功 ({len(screenshot_content)} 字), 压缩图 {len(jpg_bytes)//1024}KB")
+                except Exception as compress_err:
+                    logger.warning(f"[{lanlan_name}] 截图压缩失败（Phase 2 将退回文本模式）: {compress_err}")
+                    logger.info(f"[{lanlan_name}] Vision 通道: 截图分析成功 ({len(screenshot_content)} 字)")
+                return (mode, {'screenshot_content': screenshot_content, 'window_title': window_title, 'screenshot_b64': compressed_b64})
             
             elif mode == 'news':
                 news_content = await fetch_news_content(limit=10)
@@ -1079,9 +1144,10 @@ async def proactive_chat(request: Request):
         
         # 收集成功的信息源
         sources: dict[str, dict] = {}
-        for result in fetch_results:
+        for i, result in enumerate(fetch_results):
             if isinstance(result, Exception):
-                logger.warning(f"[{lanlan_name}] 信息源获取失败: {result}")
+                failed_mode = enabled_modes[i]
+                logger.warning(f"[{lanlan_name}] 信息源 [{failed_mode}] 获取失败: {result}")
                 continue
             mode, content = result
             sources[mode] = content
@@ -1160,6 +1226,14 @@ async def proactive_chat(request: Request):
                     "error": "纠错模型配置缺失",
                     "detail": "请在设置中配置纠错模型的model和api_key"
                 }, status_code=500)
+            
+            vision_config = _config_manager.get_model_api_config('vision')
+            vision_model_name = vision_config.get('model', '')
+            vision_base_url = vision_config.get('base_url', '')
+            vision_api_key = vision_config.get('api_key', '')
+            has_vision_model = bool(vision_model_name and vision_api_key)
+            if not has_vision_model:
+                logger.info("Vision 模型未配置，Phase 2 将退回使用 correction 模型")
         except Exception as e:
             logger.error(f"获取模型配置失败: {e}")
             return JSONResponse({
@@ -1168,28 +1242,55 @@ async def proactive_chat(request: Request):
                 "detail": str(e)
             }, status_code=500)
         
-        def _make_llm(temperature: float = 1.0, max_tokens: int = 500):
-            return ChatOpenAI(
-                model=correction_model,
-                base_url=correction_base_url,
-                api_key=correction_api_key,
+        def _make_llm(temperature: float = 1.0, max_tokens: int = 1536,
+                      use_vision: bool = False, disable_thinking: bool = True):
+            """创建 LLM 实例。use_vision=True 时使用 vision 模型；disable_thinking=False 时不注入 extra_body"""
+            if use_vision and has_vision_model:
+                m, bu, ak = vision_model_name, vision_base_url, vision_api_key
+            else:
+                m, bu, ak = correction_model, correction_base_url, correction_api_key
+            kwargs = dict(
+                model=m, base_url=bu, api_key=ak,
                 temperature=temperature,
                 max_completion_tokens=max_tokens,
-                streaming=False,
-                extra_body=get_extra_body(correction_model)
+                streaming=True,
             )
+            if disable_thinking:
+                kwargs['extra_body'] = get_extra_body(m)
+            return ChatOpenAI(**kwargs)
         
-        async def _llm_call_with_retry(system_prompt: str, label: str, temperature: float = 1.0, max_tokens: int = 500, timeout: float = 10.0) -> str:
-            """带重试的 LLM 调用，返回 response_text"""
-            llm = _make_llm(temperature=temperature, max_tokens=max_tokens)
+        async def _llm_call_with_retry(
+            system_prompt: str, label: str, *,
+            temperature: float = 1.0, max_tokens: int = 1024, timeout: float = 16.0,
+            use_vision: bool = False, disable_thinking: bool = True,
+            image_b64: str = '',
+        ) -> str:
+            """带重试的 LLM 调用。image_b64 非空时以多模态方式发送截图。"""
+            actual_model = (vision_model_name if use_vision and has_vision_model else correction_model)
+            # [临时调试]
+            print(f"\n{'='*60}\n[PROACTIVE-DEBUG] LLM call: [{label}] | model={actual_model} | temp={temperature} | max_tokens={max_tokens} | vision={use_vision} | img={'yes' if image_b64 else 'no'}\n{'='*60}\n{system_prompt}\n{'='*60}\n")
+            llm = _make_llm(temperature=temperature, max_tokens=max_tokens,
+                            use_vision=use_vision, disable_thinking=disable_thinking)
+            
+            if image_b64:
+                human_content = [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                    {"type": "text", "text": "========请开始========"},
+                ]
+            else:
+                human_content = "========请开始========"
+            messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_content)]
+            
             max_retries = 3
             retry_delays = [1, 2]
             for attempt in range(max_retries):
                 try:
                     response = await asyncio.wait_for(
-                        llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content="========请开始========")]),
+                        llm.ainvoke(messages),
                         timeout=timeout
                     )
+                    # [临时调试]
+                    print(f"\n[PROACTIVE-DEBUG] LLM output [{label}]: {response.content[:200]}...\n")
                     return response.content.strip()
                 except (APIConnectionError, InternalServerError, RateLimitError) as e:
                     if attempt < max_retries - 1:
@@ -1210,9 +1311,8 @@ async def proactive_chat(request: Request):
         vision_content = sources.get('vision')  # 可能为 None
         web_modes = [m for m in sources if m != 'vision']
         
-        # 构建带有 URL 的合并 Web 内容
         merged_web_content = ""
-        all_web_links: list[dict] = []  # 收集所有 web 源的链接
+        all_web_links: list[dict] = []
         if web_modes:
             parts = []
             for m in web_modes:
@@ -1221,14 +1321,9 @@ async def proactive_chat(request: Request):
                 label = label_map.get(m, m)
                 content_text = src.get('formatted_content', '')
                 if content_text:
-                    # 在格式化文本后附加链接信息
                     links = src.get('links', [])
                     all_web_links.extend(links)
-                    link_appendix = ""
-                    if links:
-                        link_lines = [f"  链接{i+1}: {lk.get('title','')} → {lk.get('url','')}" for i, lk in enumerate(links[:5])]
-                        link_appendix = "\n" + "\n".join(link_lines)
-                    parts.append(f"--- {label} ---\n{content_text}{link_appendix}")
+                    parts.append(f"--- {label} ---\n{content_text}")
             merged_web_content = "\n\n".join(parts)
         
         # Phase 1 结果收集
@@ -1250,22 +1345,31 @@ async def proactive_chat(request: Request):
         if merged_web_content:
             try:
                 prompt = get_proactive_screen_prompt('web', proactive_lang).format(
-                    memory_context=memory_context + "\n" + proactive_chat_history_prompt,
+                    memory_context=memory_context,
+                    recent_chats_section=proactive_chat_history_prompt,
                     merged_content=merged_web_content
                 )
                 web_result_text = await _llm_call_with_retry(prompt, "screen_web")
                 logger.info(f"[{lanlan_name}] Phase 1 Web 筛选结果: {web_result_text[:120]}")
                 
                 if "[PASS]" not in web_result_text:
-                    # 解析结构化结果提取链接
-                    parsed_link = _parse_web_screening_result(web_result_text)
-                    if parsed_link:
-                        source_links.append(parsed_link)
+                    parsed = _parse_web_screening_result(web_result_text)
+                    if parsed:
+                        matched = _lookup_link_by_title(parsed.get('title', ''), all_web_links)
+                        if matched:
+                            source_links.append({
+                                'title': parsed.get('title', matched.get('title', '')),
+                                'url': matched['url'],
+                                'source': parsed.get('source', matched.get('source', '')),
+                            })
+                            logger.info(f"[{lanlan_name}] Phase 1 链接匹配成功: {matched.get('title','')[:60]}")
+                        else:
+                            logger.info(f"[{lanlan_name}] Phase 1 未在 web_links 中匹配到标题: {parsed.get('title','')[:60]}")
                     phase1_topics.append(('web', web_result_text.strip()))
                 else:
                     logger.info(f"[{lanlan_name}] Phase 1 Web 通道返回 PASS")
             except Exception as e:
-                logger.warning(f"[{lanlan_name}] Phase 1 Web 筛选异常: {e}")
+                logger.warning(f"[{lanlan_name}] Phase 1 Web 筛选异常: {type(e).__name__}: {e}")
         
         if not phase1_topics:
             logger.info(f"[{lanlan_name}] Phase 1 所有通道均无可用话题")
@@ -1275,17 +1379,20 @@ async def proactive_chat(request: Request):
                 "message": "所有信息源筛选后均不值得搭话"
             })
         
-        # 选择最佳话题（vision 优先）
-        best_channel, best_topic = phase1_topics[0]
+        # 收集各通道结果
+        active_channels = [ch for ch, _ in phase1_topics]
+        vision_topic = None
+        web_topic = None
         for channel, topic in phase1_topics:
             if channel == 'vision':
-                best_channel, best_topic = channel, topic
-                break
-        
-        logger.info(f"[{lanlan_name}] Phase 1 最终选择 [{best_channel}] 话题: {best_topic[:80]}")
+                vision_topic = topic
+            elif channel == 'web':
+                web_topic = topic
+        primary_channel = 'vision' if vision_topic else active_channels[0]
+        logger.info(f"[{lanlan_name}] Phase 1 可用通道: {active_channels}，主通道: {primary_channel}")
         
         # ================================================================
-        # Phase 2: 结合人设生成搭话 — 1 次 LLM 调用
+        # Phase 2: 结合人设 + 双通道信息生成搭话 — 1 次 LLM 调用
         # ================================================================
         
         # 获取角色完整人设
@@ -1293,30 +1400,108 @@ async def proactive_chat(request: Request):
         if not character_prompt:
             logger.warning(f"[{lanlan_name}] 未找到角色人设，使用空字符串")
         
+        # 构建屏幕内容段（vision 通道）
+        _screen_labels = {
+            'zh': '======主人的屏幕======',
+            'en': "======Master's Screen======",
+            'ja': '======ご主人の画面======',
+            'ko': '======주인의 화면======',
+        }
+        _screen_footers = {
+            'zh': '======屏幕内容结束======',
+            'en': '======Screen Content End======',
+            'ja': '======画面内容ここまで======',
+            'ko': '======화면 내용 끝======',
+        }
+        screenshot_b64_for_phase2 = ''
+        screen_section = ""
+        if vision_topic:
+            sl = _screen_labels.get(proactive_lang, _screen_labels['zh'])
+            sf = _screen_footers.get(proactive_lang, _screen_footers['zh'])
+            vision_window = vision_content.get('window_title', '') if vision_content else ''
+            screenshot_b64_for_phase2 = (vision_content.get('screenshot_b64', '') if vision_content else '')
+            window_line = f"当前活跃窗口：{vision_window}\n" if vision_window else ""
+            
+            if screenshot_b64_for_phase2 and has_vision_model:
+                _img_hints = {
+                    'zh': '（上方附有主人当前的屏幕截图，请直接观察截图内容来搭话）',
+                    'en': "(The master's current screenshot is attached above — observe it directly)",
+                    'ja': '（上にご主人のスクリーンショットがあります。直接観察してください）',
+                    'ko': '(위에 주인의 스크린샷이 첨부되어 있습니다. 직접 관찰하세요)',
+                }
+                hint = _img_hints.get(proactive_lang, _img_hints['zh'])
+                screen_section = f"{sl}\n{window_line}{hint}\n{sf}"
+                logger.info(f"[{lanlan_name}] Phase 2 将使用 vision 模型直接看截图")
+            else:
+                screen_section = f"{sl}\n{window_line}{vision_topic}\n{sf}"
+                if vision_topic and not screenshot_b64_for_phase2:
+                    logger.info(f"[{lanlan_name}] Phase 2 无压缩截图，退回文本描述模式")
+        
+        # 构建外部话题段（web 通道）
+        _ext_labels = {
+            'zh': '======外部话题======\n你注意到一个有趣的话题：',
+            'en': '======External Topic======\nYou noticed an interesting topic:',
+            'ja': '======外部の話題======\n面白い話題を見つけました：',
+            'ko': '======외부 주제======\n흥미로운 주제를 발견했습니다:',
+        }
+        _ext_footers = {
+            'zh': '======外部话题结束======',
+            'en': '======External Topic End======',
+            'ja': '======外部話題ここまで======',
+            'ko': '======외부 주제 끝======',
+        }
+        external_section = ""
+        if web_topic:
+            el = _ext_labels.get(proactive_lang, _ext_labels['zh'])
+            ef = _ext_footers.get(proactive_lang, _ext_footers['zh'])
+            external_section = f"{el}\n{web_topic}\n{ef}"
+        
         generate_prompt = get_proactive_generate_prompt(proactive_lang).format(
             character_prompt=character_prompt,
             inner_thoughts=inner_thoughts,
             memory_context=memory_context,
             recent_chats_section=proactive_chat_history_prompt,
-            topic_summary=best_topic,
+            screen_section=screen_section,
+            external_section=external_section,
             master_name=master_name_current
         )
         
-        response_text = await _llm_call_with_retry(generate_prompt, "generate", temperature=1.0, max_tokens=500)
-        logger.info(f"[{lanlan_name}] Phase 2 生成结果: {response_text[:100]}...")
+        phase2_use_vision = bool(screenshot_b64_for_phase2 and has_vision_model)
+        response_text = await _llm_call_with_retry(
+            generate_prompt, "generate", temperature=1.0,
+            use_vision=phase2_use_vision, disable_thinking=False,
+            image_b64=screenshot_b64_for_phase2 if phase2_use_vision else '',
+        )
+        logger.info(f"[{lanlan_name}] Phase 2 原始输出 (vision={phase2_use_vision}): {response_text[:120]}...")
         
         # 清理 "主动搭话" 标记
         matches = list(re.finditer(r'主动搭话\s*\n', response_text))
         if matches:
             response_text = response_text[matches[-1].end():].strip()
         
-        # 检查 PASS
-        if "[PASS]" in response_text:
+        # 解析来源标签 [SCREEN] / [WEB] / [BOTH] / [PASS]
+        source_tag = ''
+        tag_match = re.match(r'^\[(SCREEN|WEB|BOTH|PASS)\]\s*', response_text, re.IGNORECASE)
+        if tag_match:
+            source_tag = tag_match.group(1).upper()
+            response_text = response_text[tag_match.end():].strip()
+            logger.info(f"[{lanlan_name}] Phase 2 来源标签: [{source_tag}]")
+        else:
+            logger.info(f"[{lanlan_name}] Phase 2 未输出来源标签，按 fallback 处理")
+        
+        if source_tag == 'PASS' or (not source_tag and "[PASS]" in response_text):
             return JSONResponse({
                 "success": True,
                 "action": "pass",
                 "message": "Phase 2 AI选择不搭话"
             })
+        
+        # 根据来源标签决定是否保留链接
+        if source_tag == 'SCREEN':
+            source_links = []
+            primary_channel = 'vision'
+        elif source_tag in ('WEB', 'BOTH'):
+            primary_channel = 'web' if source_tag == 'WEB' else primary_channel
         
         # ========== 后处理（改写检查） ==========
         text_length = 200
@@ -1328,7 +1513,7 @@ async def proactive_chat(request: Request):
         if text_length > 100 or response_text.find("|") != -1 or response_text.find("｜") != -1:
             try:
                 rewrite_prompt = get_proactive_chat_rewrite_prompt(proactive_lang).format(raw_output=response_text)
-                response_text = await _llm_call_with_retry(rewrite_prompt, "rewrite", temperature=0.3, max_tokens=500, timeout=6.0)
+                response_text = await _llm_call_with_retry(rewrite_prompt, "rewrite", temperature=0.3, max_tokens=800, timeout=16.0)
                 logger.debug(f"[{lanlan_name}] 改写后内容: {response_text[:100]}...")
 
                 if "主动搭话" in response_text or '|' in response_text or "｜" in response_text or '[PASS]' in response_text or count_words_and_chars(response_text) > 100:
@@ -1357,15 +1542,17 @@ async def proactive_chat(request: Request):
                 "message": "主动搭话条件未满足（用户近期活跃或语音会话正在进行）"
             })
 
-        # 记录主动搭话（成功投递后）
-        _record_proactive_chat(lanlan_name, response_text)
+        # 记录主动搭话（成功投递后，附带主通道信息）
+        _record_proactive_chat(lanlan_name, response_text, primary_channel)
 
         return JSONResponse({
             "success": True,
             "action": "chat",
             "message": "主动搭话已发送",
             "lanlan_name": lanlan_name,
-            "source_mode": best_channel,
+            "source_mode": primary_channel,
+            "source_tag": source_tag or "unknown",
+            "active_channels": active_channels,
             "source_links": source_links
         })
         

@@ -1079,15 +1079,16 @@ async def generate_diverse_queries(window_title: str) -> List[str]:
         from utils.config_manager import ConfigManager
         config_manager = ConfigManager()
         
-        # 使用correction模型配置（轻量级模型，适合此任务）
-        correction_config = config_manager.get_model_api_config('correction')
+        # 使用summary模型配置
+        summary_config = config_manager.get_model_api_config('summary')
         
         llm = ChatOpenAI(
-            model=correction_config['model'],
-            base_url=correction_config['base_url'],
-            api_key=correction_config['api_key'],
-            temperature=1.0,  # 提高temperature以获得更多样化的结果
-            timeout=10.0
+            model=summary_config['model'],
+            base_url=summary_config['base_url'],
+            api_key=summary_config['api_key'],
+            temperature=1.0,
+            timeout=10.0,
+            max_retries=0,
         )
         
         # 清理/脱敏窗口标题用于日志显示
