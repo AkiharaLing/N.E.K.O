@@ -1350,12 +1350,18 @@ async def admin_control(payload: Dict[str, Any]):
                     await Modules.computer_use_queue.get()
         except Exception:
             pass
-        # Close active browser-use sessions so the browser agent stops
+        # Discard browser-use agents/overlay but keep the browser window for user inspection
         try:
             if Modules.browser_use:
-                await Modules.browser_use._close_browser()
+                Modules.browser_use._stop_overlay()
+                Modules.browser_use._agents.clear()
+                try:
+                    if Modules.browser_use._browser_session is not None:
+                        await Modules.browser_use._remove_overlay(Modules.browser_use._browser_session)
+                except Exception:
+                    pass
         except Exception as e:
-            logger.warning(f"[Agent] Error closing browser-use session during end_all: {e}")
+            logger.warning(f"[Agent] Error cleaning browser-use agents during end_all: {e}")
         # Reset computer-use step history so stale context is cleared
         try:
             if Modules.computer_use:

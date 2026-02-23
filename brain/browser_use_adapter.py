@@ -6,7 +6,6 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from config import get_agent_extra_body
 from utils.config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -310,7 +309,6 @@ class BrowserUseAdapter:
         api_cfg = self._config_manager.get_model_api_config("agent")
         base_url = api_cfg.get("base_url", "") or ""
         model = api_cfg.get("model", "") or ""
-        extra_body = get_agent_extra_body(model)
         kwargs: Dict[str, Any] = dict(
             model=model,
             api_key=api_cfg.get("api_key"),
@@ -321,8 +319,6 @@ class BrowserUseAdapter:
             remove_min_items_from_schema=False,
             remove_defaults_from_schema=False,
         )
-        if extra_body:
-            kwargs["extra_body"] = extra_body
         if mode == "text":
             kwargs["dont_force_structured_output"] = True
             kwargs["add_schema_to_system_prompt"] = True
