@@ -1026,7 +1026,7 @@ def gemini_tts_worker(request_queue, response_queue, audio_api_key, voice_id):
         return
     
     # Gemini TTS 是基于 HTTP 的，无需建立持久连接，直接发送就绪信号
-    logger.info("Gemini TTS 已就绪，发送就绪信号")
+    logger.info(f"Gemini TTS 已就绪，发送就绪信号 (response_queue id={id(response_queue):#x})")
     response_queue.put(("__ready__", True))
     
     current_speech_id = None
@@ -1048,8 +1048,8 @@ def gemini_tts_worker(request_queue, response_queue, audio_api_key, voice_id):
             if text_buffer and current_speech_id is not None:
                 full_text = "".join(text_buffer)
                 if full_text.strip():
+                    logger.info(f"Gemini TTS 开始合成: {len(full_text)} chars, voice={voice_id}")
                     try:
-                        # 使用 Gemini TTS API 进行合成
                         response = client.models.generate_content(
                             model="gemini-2.5-flash-preview-tts",
                             contents=full_text,
@@ -1066,27 +1066,35 @@ def gemini_tts_worker(request_queue, response_queue, audio_api_key, voice_id):
                         )
                         
                         # 提取音频数据
-                        if (response.candidates and 
-                            response.candidates[0].content and 
-                            response.candidates[0].content.parts):
-                            audio_data = response.candidates[0].content.parts[0].inline_data.data
-                            
-                            if audio_data:
-                                # Gemini TTS 返回 PCM 16-bit @ 24000Hz
-                                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-                                
-                                # 使用 soxr 进行高质量重采样 24000Hz -> 48000Hz
-                                resampled = soxr.resample(audio_array, 24000, 48000, quality='HQ')
-                                
-                                # 转回 int16 格式
-                                resampled_int16 = (resampled * 32768.0).clip(-32768, 32767).astype(np.int16)
-                                response_queue.put(resampled_int16.tobytes())
-                                logger.debug(f"Gemini TTS 合成完成，音频长度: {len(resampled_int16)} 采样点")
+                        candidates = response.candidates or []
+                        parts = (
+                            candidates[0].content.parts
+                            if candidates and candidates[0].content
+                            else []
+                        ) or []
+                        inline = getattr(parts[0], "inline_data", None) if parts else None
+                        audio_data = getattr(inline, "data", None) if inline else None
+
+                        if audio_data:
+                            audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                            resampled = soxr.resample(audio_array, 24000, 48000, quality='HQ')
+                            resampled_int16 = (resampled * 32768.0).clip(-32768, 32767).astype(np.int16)
+                            audio_bytes = resampled_int16.tobytes()
+                            response_queue.put(audio_bytes)
+                            logger.info(f"Gemini TTS 合成完成: {len(resampled_int16)} samples, {len(audio_bytes)}B → queue(id={id(response_queue):#x}, qsize≈{response_queue.qsize()})")
                         else:
-                            logger.warning("Gemini TTS 返回空响应")
+                            logger.warning(
+                                "Gemini TTS 200 OK 但无音频数据: "
+                                f"candidates={len(candidates)}, parts={len(parts)}, "
+                                f"inline={inline is not None}, audio_len={len(audio_data) if audio_data else 0}"
+                            )
                             
                     except Exception as e:
                         logger.error(f"Gemini TTS 合成失败: {e}")
+                else:
+                    logger.debug("Gemini TTS 跳过: 累积文本为空白")
+            else:
+                logger.debug(f"Gemini TTS flush 无操作: buffer_len={len(text_buffer)}, speech_id={current_speech_id}")
             
             # 清空缓冲区
             text_buffer = []

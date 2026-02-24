@@ -1006,6 +1006,32 @@ async def get_window_title_api():
         return JSONResponse({"success": False, "window_title": None})
 
 
+@router.get('/screenshot')
+async def backend_screenshot(request: Request):
+    """后端截图兜底：当前端所有屏幕捕获 API 都失败时，由后端用 pyautogui 截取本机屏幕。
+    安全限制：仅允许来自 loopback 地址的请求。返回 JPEG base64 DataURL。"""
+    client_host = request.client.host if request.client else ''
+    if client_host not in ('127.0.0.1', '::1', 'localhost', '0.0.0.0'):
+        return JSONResponse({"success": False, "error": "only available from localhost"}, status_code=403)
+
+    try:
+        import pyautogui
+    except ImportError:
+        return JSONResponse({"success": False, "error": "pyautogui not installed"}, status_code=501)
+
+    try:
+        shot = pyautogui.screenshot()
+        if shot.mode in ('RGBA', 'LA', 'P'):
+            shot = shot.convert('RGB')
+        jpg_bytes = compress_screenshot(shot, target_h=COMPRESS_TARGET_HEIGHT, quality=COMPRESS_JPEG_QUALITY)
+        b64 = base64.b64encode(jpg_bytes).decode('utf-8')
+        data_url = f"data:image/jpeg;base64,{b64}"
+        return JSONResponse({"success": True, "data": data_url, "size": len(jpg_bytes)})
+    except Exception as e:
+        logger.error(f"后端截图失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 @router.post('/proactive_chat')
 async def proactive_chat(request: Request):
     """主动搭话：两阶段架构 — Phase 1 筛选话题（max 2 并发 LLM），Phase 2 结合人设生成搭话"""

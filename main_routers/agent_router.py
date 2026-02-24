@@ -286,6 +286,19 @@ async def proxy_task_detail(task_id: str):
         return JSONResponse({"error": f"proxy error: {e}"}, status_code=502)
 
 
+@router.post('/tasks/{task_id}/cancel')
+async def proxy_task_cancel(task_id: str):
+    """Cancel a specific task via tool server proxy."""
+    try:
+        client = _get_http_client()
+        r = await client.post(f"{TOOL_SERVER_BASE}/tasks/{task_id}/cancel", timeout=5.0)
+        if not r.is_success:
+            return JSONResponse({"success": False, "error": f"tool_server responded {r.status_code}"}, status_code=502)
+        return r.json()
+    except Exception as e:
+        return JSONResponse({"success": False, "error": f"proxy error: {e}"}, status_code=502)
+
+
 @router.post('/admin/control')
 async def proxy_admin_control(payload: dict = Body(...)):
     """Proxy admin control commands to tool server."""
