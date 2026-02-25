@@ -15,7 +15,7 @@ conflicts = ["<0.1.0", ">=0.4.0"]
 [plugin.config]
 napcat_host = "127.0.0.1"
 napcat_port = 3001
-qq_account = 3189639201  # 你的QQ账号（用于多账号区分）
+qq_account =  # 你的QQ账号（用于多账号区分）
 master_qq = 0  # 主人QQ号（设置为0表示不启用主人识别，或填写具体QQ号）
 
 # 自动回复配置
