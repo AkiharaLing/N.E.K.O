@@ -10,6 +10,7 @@ import time
 import hashlib
 from typing import Dict, Any, Optional, ClassVar
 from datetime import datetime
+from contextlib import asynccontextmanager
 import httpx
 
 from fastapi import FastAPI, HTTPException
@@ -26,12 +27,142 @@ from brain.agent_session import get_session_manager
 from utils.config_manager import get_config_manager
 from main_logic.agent_event_bus import AgentServerEventBridge
 
-
-app = FastAPI(title="N.E.K.O Tool Server")
-
 # Configure logging
 from utils.logger_config import setup_logging, ThrottledLogger
 logger, log_config = setup_logging(service_name="Agent", log_level=logging.INFO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("[Agent] Starting up...")
+    
+    # 初始化新的合并执行器（推荐使用）
+    Modules.computer_use = ComputerUseAdapter()
+    Modules.browser_use = BrowserUseAdapter()
+    Modules.task_executor = DirectTaskExecutor(computer_use=Modules.computer_use, browser_use=Modules.browser_use)
+    Modules.deduper = TaskDeduper()
+    
+    # 保留 planner/analyzer 以支持能力探测与后台分析开关
+    Modules.planner = TaskPlanner(computer_use=Modules.computer_use)
+    Modules.analyzer = ConversationAnalyzer()
+    _rewire_computer_use_dependents()
+    
+    # Prime capability cache cheaply at startup
+    try:
+        if Modules.computer_use:
+            cu = Modules.computer_use.is_available()
+            reasons = cu.get("reasons", []) if isinstance(cu, dict) else []
+            _set_capability("computer_use", bool(cu.get("ready")) if isinstance(cu, dict) else False, reasons[0] if reasons else "")
+    except Exception:
+        _set_capability("computer_use", False, "Computer Use check failed")
+    try:
+        if Modules.browser_use:
+            bu = Modules.browser_use.is_available()
+            reasons = bu.get("reasons", []) if isinstance(bu, dict) else []
+            _set_capability("browser_use", bool(bu.get("ready")) if isinstance(bu, dict) else False, reasons[0] if reasons else "")
+    except Exception:
+        _set_capability("browser_use", False, "Browser Use check failed")
+
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            r = await client.get(f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugins")
+            if r.status_code == 200:
+                _set_capability("user_plugin", True, "")
+            else:
+                _set_capability("user_plugin", False, f"user_plugin server responded {r.status_code}")
+    except Exception as e:
+        _set_capability("user_plugin", False, str(e))
+    
+    # Warm up router discovery
+    try:
+        await Modules.task_executor.refresh_capabilities()
+    except Exception:
+        pass
+
+    try:
+        async def _http_plugin_provider(force_refresh: bool = False):
+            url = f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugins"
+            logger.debug(f"[Agent] plugin_list_provider url: {url}")
+            if force_refresh:
+                url += "?refresh=true"
+            try:
+                async with httpx.AsyncClient(timeout=1.0) as client:
+                    r = await client.get(url)
+                    if r.status_code == 200:
+                        try:
+                            data = r.json()
+                        except Exception as parse_err:
+                            logger.debug(f"[Agent] plugin_list_provider parse error: {parse_err}")
+                            data = {}
+                        return data.get("plugins", []) or []
+            except Exception as e:
+                logger.debug(f"[Agent] plugin_list_provider http fetch failed: {e}")
+            return []
+
+        # inject http-based provider so DirectTaskExecutor can pick up user_plugin_server plugins
+        try:
+            Modules.task_executor.set_plugin_list_provider(_http_plugin_provider)
+            logger.info("[Agent] Registered http plugin_list_provider for task_executor")
+            
+            # 主动获取并显示插件列表
+            try:
+                plugins = await Modules.task_executor.plugin_list_provider(force_refresh=True)
+                if plugins:
+                    logger.info(f"[Agent] ✅ 发现 {len(plugins)} 个用户插件:")
+                    for plugin in plugins:
+                        plugin_id = plugin.get("id", "unknown")
+                        plugin_name = plugin.get("name", "unknown")
+                        plugin_version = plugin.get("version", "unknown")
+                        logger.info(f"[Agent]   - {plugin_name} (v{plugin_version}) [ID: {plugin_id}]")
+                else:
+                    logger.info("[Agent] ℹ️  未发现用户插件")
+            except Exception as e:
+                logger.warning(f"[Agent] Failed to fetch plugin list at startup: {e}")
+        except Exception as e:
+            logger.warning(f"[Agent] Failed to inject plugin_list_provider into task_executor: {e}")
+    except Exception as e:
+        logger.warning(f"[Agent] Failed to set http plugin_list_provider: {e}")
+
+    # Start computer-use scheduler
+    sch_task = asyncio.create_task(_computer_use_scheduler_loop())
+    Modules._persistent_tasks.add(sch_task)
+    sch_task.add_done_callback(Modules._persistent_tasks.discard)
+    
+    # Start ZeroMQ bridge for main_server events
+    try:
+        Modules.agent_bridge = AgentServerEventBridge(on_session_event=_on_session_event)
+        await Modules.agent_bridge.start()
+    except Exception as e:
+        logger.warning(f"[Agent] Event bridge startup failed: {e}")
+    
+    # Push initial server status so frontend can render Agent popup without waiting.
+    _bump_state_revision()
+    await _emit_agent_status_update()
+    
+    logger.info("[Agent] ✅ Agent server started with simplified task executor")
+    
+    yield
+    
+    # Shutdown logic
+    logger.info("[Agent] Shutting down...")
+    # Stop persistent tasks
+    for task in list(Modules._persistent_tasks):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    # Stop event bridge
+    if Modules.agent_bridge:
+        try:
+            await Modules.agent_bridge.stop()
+        except Exception as e:
+            logger.warning(f"[Agent] Event bridge shutdown failed: {e}")
+    logger.info("[Agent] Shutdown complete")
+
+
+app = FastAPI(title="N.E.K.O Tool Server", lifespan=lifespan)
 
 
 class Modules:
@@ -769,84 +900,6 @@ async def _do_analyze_and_plan(messages: list[dict[str, Any]], lanlan_name: Opti
     
     except Exception as e:
         logger.error(f"[TaskExecutor] Background task error: {e}", exc_info=True)
-
-@app.on_event("startup")
-async def startup():
-    # 初始化新的合并执行器（推荐使用）
-    Modules.computer_use = ComputerUseAdapter()
-    Modules.browser_use = BrowserUseAdapter()
-    Modules.task_executor = DirectTaskExecutor(computer_use=Modules.computer_use, browser_use=Modules.browser_use)
-    Modules.deduper = TaskDeduper()
-    
-    # 保留 planner/analyzer 以支持能力探测与后台分析开关
-    Modules.planner = TaskPlanner(computer_use=Modules.computer_use)
-    Modules.analyzer = ConversationAnalyzer()
-    _rewire_computer_use_dependents()
-    # Prime capability cache cheaply at startup
-    try:
-        if Modules.computer_use:
-            cu = Modules.computer_use.is_available()
-            reasons = cu.get("reasons", []) if isinstance(cu, dict) else []
-            _set_capability("computer_use", bool(cu.get("ready")) if isinstance(cu, dict) else False, reasons[0] if reasons else "")
-    except Exception:
-        _set_capability("computer_use", False, "Computer Use check failed")
-    try:
-        if Modules.browser_use:
-            bu = Modules.browser_use.is_available()
-            reasons = bu.get("reasons", []) if isinstance(bu, dict) else []
-            _set_capability("browser_use", bool(bu.get("ready")) if isinstance(bu, dict) else False, reasons[0] if reasons else "")
-    except Exception:
-        _set_capability("browser_use", False, "Browser Use check failed")
-    
-    # Warm up router discovery
-    try:
-        await Modules.task_executor.refresh_capabilities()
-    except Exception:
-        pass
-
-    try:
-        async def _http_plugin_provider(force_refresh: bool = False):
-            url = f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugins"
-            if force_refresh:
-                url += "?refresh=true"
-            try:
-                async with httpx.AsyncClient(timeout=1.0) as client:
-                    r = await client.get(url)
-                    if r.status_code == 200:
-                        try:
-                            data = r.json()
-                        except Exception as parse_err:
-                            logger.debug(f"[Agent] plugin_list_provider parse error: {parse_err}")
-                            data = {}
-                        return data.get("plugins", []) or []
-            except Exception as e:
-                logger.debug(f"[Agent] plugin_list_provider http fetch failed: {e}")
-            return []
-
-        # inject http-based provider so DirectTaskExecutor can pick up user_plugin_server plugins
-        try:
-            Modules.task_executor.set_plugin_list_provider(_http_plugin_provider)
-            logger.info("[Agent] Registered http plugin_list_provider for task_executor")
-        except Exception as e:
-            logger.warning(f"[Agent] Failed to inject plugin_list_provider into task_executor: {e}")
-    except Exception as e:
-        logger.warning(f"[Agent] Failed to set http plugin_list_provider: {e}")
-
-    # Start computer-use scheduler
-    sch_task = asyncio.create_task(_computer_use_scheduler_loop())
-    Modules._persistent_tasks.add(sch_task)
-    sch_task.add_done_callback(Modules._persistent_tasks.discard)
-    # Start ZeroMQ bridge for main_server events
-    try:
-        Modules.agent_bridge = AgentServerEventBridge(on_session_event=_on_session_event)
-        await Modules.agent_bridge.start()
-    except Exception as e:
-        logger.warning(f"[Agent] Event bridge startup failed: {e}")
-    # Push initial server status so frontend can render Agent popup without waiting.
-    _bump_state_revision()
-    await _emit_agent_status_update()
-    
-    logger.info("[Agent] ✅ Agent server started with simplified task executor")
 
 
 @app.get("/health")

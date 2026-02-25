@@ -161,6 +161,7 @@ setting_store = None
 recent_log = None
 catgirl_names = []
 agent_event_bridge: MainServerAgentBridge | None = None
+plugin_message_router = None
 
 
 async def _handle_agent_event(event: dict):
@@ -713,6 +714,24 @@ async def on_startup():
             logger.warning(f"Agent event bridge startup failed: {e}")
         await _init_and_mount_workshop()
         logger.info("Startup 初始化完成，后台正在预加载音频模块...")
+
+        # 启动插件服务器
+        try:
+            from plugin.server.lifecycle import startup
+            await startup()
+            logger.info("✅ 插件服务器已启动")
+        except Exception as e:
+            logger.warning(f"插件服务器启动失败: {e}")
+
+        # 启动插件消息路由器
+        try:
+            from plugin.message_router import get_message_router
+            global plugin_message_router
+            plugin_message_router = get_message_router()
+            await plugin_message_router.start()
+            logger.info("✅ 插件消息路由器已启动")
+        except Exception as e:
+            logger.warning(f"插件消息路由器启动失败: {e}")
 
         # 初始化全局语言变量（优先级：Steam设置 > 系统设置）
         try:

@@ -82,6 +82,21 @@ class PluginCommunicationResourceManager:
             self._message_consumer_task = asyncio.create_task(self._consume_messages())
             self.logger.debug(f"Started message consumer for plugin {self.plugin_id}")
     
+    async def start_reverse_message_consumer(self, source_queue: asyncio.Queue, source_filter: str = None) -> None:
+        """
+        启动反向消息消费后台任务
+        
+        从主进程的消息队列中读取消息并发送到插件的 cmd_queue
+        
+        Args:
+            source_queue: 主进程的消息队列
+            source_filter: 消息来源过滤器（只处理匹配来源的消息）
+        """
+        self._ensure_shutdown_event()
+        task = asyncio.create_task(self._consume_reverse_messages(source_queue, source_filter))
+        self.logger.debug(f"Started reverse message consumer for plugin {self.plugin_id}, filter: {source_filter}")
+        return task
+    
     async def shutdown(self, timeout: float = PLUGIN_SHUTDOWN_TIMEOUT) -> None:
         """
         关闭通信资源
@@ -297,7 +312,7 @@ class PluginCommunicationResourceManager:
                             f"Source: {msg.get('source', 'unknown')} | "
                             f"Priority: {msg.get('priority', 0)} | "
                             f"Description: {msg.get('description', '')} | "
-                            f"Content: {str(msg.get('content', ''))[:100]}"
+                            f"Content: {str(msg.get('content', ''))[:]}"
                         )
                 except asyncio.QueueFull:
                     self.logger.warning(f"Main message queue is full, dropping message from plugin {self.plugin_id}")
@@ -318,6 +333,64 @@ class PluginCommunicationResourceManager:
                 # 其他未知异常
                 if not self._shutdown_event.is_set():
                     self.logger.exception(f"Unexpected error consuming messages for plugin {self.plugin_id}: {e}")
+                # 短暂休眠避免 CPU 占用过高
+                await asyncio.sleep(MESSAGE_CONSUMER_SLEEP_INTERVAL)
+    
+    async def _consume_reverse_messages(self, source_queue: asyncio.Queue, source_filter: str = None) -> None:
+        """
+        后台任务：从主进程的消息队列中读取消息并发送到插件的 cmd_queue
+        
+        Args:
+            source_queue: 主进程的消息队列
+            source_filter: 消息来源过滤器（只处理匹配来源的消息）
+        """
+        loop = asyncio.get_running_loop()
+        
+        while not self._shutdown_event.is_set():
+            try:
+                # 从主进程的消息队列中获取消息
+                msg = await asyncio.wait_for(source_queue.get(), timeout=QUEUE_GET_TIMEOUT)
+                
+                # 检查消息来源过滤器
+                if source_filter:
+                    msg_source = msg.get("source", "")
+                    content = msg.get("content", {})
+                    content_source = content.get("source", "")
+                    
+                    # 只处理匹配来源的消息
+                    if msg_source != source_filter and content_source != source_filter:
+                        continue
+                
+                # 发送 MESSAGE 命令到插件的 cmd_queue
+                try:
+                    await loop.run_in_executor(
+                        self._executor,
+                        lambda: self.cmd_queue.put({
+                            "type": "MESSAGE",
+                            "source": msg.get("source", ""),
+                            "content": msg.get("content", {})
+                        }, timeout=QUEUE_GET_TIMEOUT)
+                    )
+                    self.logger.debug(
+                        f"[REVERSE MESSAGE] Plugin: {self.plugin_id} | "
+                        f"Source: {msg.get('source', 'unknown')} | "
+                        f"Description: {msg.get('description', '')}"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to send MESSAGE to plugin {self.plugin_id}: {e}")
+                    
+            except asyncio.TimeoutError:
+                # 队列为空，继续等待
+                continue
+            except (OSError, RuntimeError) as e:
+                # 系统级错误
+                if not self._shutdown_event.is_set():
+                    self.logger.error(f"System error consuming reverse messages for plugin {self.plugin_id}: {e}")
+                await asyncio.sleep(MESSAGE_CONSUMER_SLEEP_INTERVAL)
+            except Exception as e:
+                # 其他未知异常
+                if not self._shutdown_event.is_set():
+                    self.logger.exception(f"Unexpected error consuming reverse messages for plugin {self.plugin_id}: {e}")
                 # 短暂休眠避免 CPU 占用过高
                 await asyncio.sleep(MESSAGE_CONSUMER_SLEEP_INTERVAL)
 

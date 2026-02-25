@@ -100,9 +100,11 @@ supported = ">=0.1.0,<0.3.0"
 untested = ">=0.3.0,<0.4.0"
 # 明确冲突的范围（命中即拒绝加载）
 conflicts = ["<0.1.0", ">=0.4.0"]
+
 ```
 
 **配置说明：**
+
 - `id`: 插件的唯一标识符（必须）
 - `name`: 插件的显示名称
 - `description`: 插件描述
@@ -124,12 +126,12 @@ from typing import Any
 @neko_plugin
 class HelloWorldPlugin(NekoPluginBase):
     """Hello World 插件示例"""
-    
+  
     def __init__(self, ctx: Any):
         super().__init__(ctx)
         self.logger = ctx.logger
         self.logger.info("HelloWorldPlugin initialized")
-    
+  
     @plugin_entry(
         id="greet",
         name="Greet",
@@ -194,6 +196,7 @@ class MyPlugin(NekoPluginBase):
 #### 3.1.2 基类方法
 
 **`get_input_schema()`**
+
 ```python
 def get_input_schema(self) -> Dict[str, Any]:
     """获取插件的输入模式"""
@@ -208,6 +211,7 @@ def get_input_schema(self) -> Dict[str, Any]:
 ```
 
 **`report_status()`**
+
 ```python
 def report_status(self, status: Dict[str, Any]) -> None:
     """上报插件状态到主进程"""
@@ -225,6 +229,7 @@ self.report_status({
 ```
 
 **`collect_entries()`**
+
 ```python
 def collect_entries(self) -> Dict[str, EventHandler]:
     """收集所有入口点（通常不需要手动调用）"""
@@ -249,6 +254,7 @@ ctx.message_queue  # Queue: 消息队列（内部使用）
 #### 3.2.2 方法
 
 **`update_status()`**
+
 ```python
 def update_status(self, status: Dict[str, Any]) -> None:
     """更新插件状态"""
@@ -260,6 +266,7 @@ def update_status(self, status: Dict[str, Any]) -> None:
 ```
 
 **`push_message()`**
+
 ```python
 def push_message(
     self,
@@ -273,7 +280,7 @@ def push_message(
     metadata: Optional[Dict[str, Any]] = None  # 额外元数据
 ) -> None:
     """推送消息到主进程"""
-    
+  
     # 示例：推送文本消息
     ctx.push_message(
         source="my_feature",
@@ -283,7 +290,7 @@ def push_message(
         content="任务已成功完成",
         metadata={"task_id": "123", "duration": 10.5}
     )
-    
+  
     # 示例：推送URL消息
     ctx.push_message(
         source="web_scraper",
@@ -293,7 +300,7 @@ def push_message(
         content="https://example.com/article",
         metadata={"title": "Example Article"}
     )
-    
+  
     # 示例：推送二进制数据（小文件）
     with open("image.png", "rb") as f:
         image_data = f.read()
@@ -305,7 +312,7 @@ def push_message(
         binary_data=image_data,
         metadata={"format": "png", "size": len(image_data)}
     )
-    
+  
     # 示例：推送大文件的URL引用
     ctx.push_message(
         source="file_processor",
@@ -334,6 +341,7 @@ class MyPlugin(NekoPluginBase):
 ```
 
 **说明：**
+
 - 必须放在类定义之前
 - 不需要参数
 - 插件元数据从 `plugin.toml` 读取
@@ -502,13 +510,13 @@ from plugin.sdk.decorators import lifecycle
 def startup(self, **_):
     """插件启动时的初始化逻辑"""
     self.logger.info("Plugin starting up...")
-    
+  
     # 初始化资源
     self._initialize_resources()
-    
+  
     # 上报状态
     self.report_status({"status": "initialized"})
-    
+  
     return {"status": "ready"}
 ```
 
@@ -523,13 +531,13 @@ def startup(self, **_):
 def shutdown(self, **_):
     """插件关闭时的清理逻辑"""
     self.logger.info("Plugin shutting down...")
-    
+  
     # 清理资源
     self._cleanup_resources()
-    
+  
     # 保存状态
     self._save_state()
-    
+  
     return {"status": "stopped"}
 ```
 
@@ -544,10 +552,10 @@ def shutdown(self, **_):
 def reload(self, **_):
     """插件重载时的逻辑"""
     self.logger.info("Plugin reloading...")
-    
+  
     # 重新加载配置
     self._reload_config()
-    
+  
     return {"status": "reloaded"}
 ```
 
@@ -570,10 +578,10 @@ from plugin.sdk.decorators import timer_interval
 def periodic_task(self, **_):
     """定期执行的任务"""
     self.logger.info("Running periodic task...")
-    
+  
     # 执行任务逻辑
     result = self._do_work()
-    
+  
     # 推送消息
     self.ctx.push_message(
         source="periodic_task",
@@ -583,11 +591,12 @@ def periodic_task(self, **_):
         content=f"任务结果: {result}",
         metadata={"task_id": "periodic_001"}
     )
-    
+  
     return {"executed": True}
 ```
 
 **重要说明：**
+
 - `auto_start=True` 时，插件加载后自动开始定时执行
 - 定时任务在独立线程中运行
 - 支持同步和异步函数
@@ -618,10 +627,10 @@ from plugin.sdk.decorators import message
 def handle_chat(self, text: str, sender: str, timestamp: str, **_):
     """处理聊天消息"""
     self.logger.info(f"Received message from {sender}: {text}")
-    
+  
     # 处理消息逻辑
     response = self._process_message(text)
-    
+  
     # 推送回复
     self.ctx.push_message(
         source="chat_handler",
@@ -631,7 +640,7 @@ def handle_chat(self, text: str, sender: str, timestamp: str, **_):
         content=response,
         metadata={"original_sender": sender}
     )
-    
+  
     return {"handled": True}
 ```
 
@@ -677,7 +686,7 @@ class MyPlugin(NekoPluginBase):
     def __init__(self, ctx):
         super().__init__(ctx)
         self.logger = ctx.logger
-    
+  
     @plugin_entry(id="example")
     def example(self, **_):
         # 不同级别的日志
@@ -686,7 +695,7 @@ class MyPlugin(NekoPluginBase):
         self.logger.warning("警告信息")
         self.logger.error("错误信息")
         self.logger.exception("异常信息（包含堆栈）")
-        
+      
         return {"status": "ok"}
 ```
 
@@ -697,11 +706,11 @@ class MyPlugin(NekoPluginBase):
 def long_task(self, **_):
     """长时间运行的任务"""
     total_steps = 100
-    
+  
     for i in range(total_steps):
         # 执行步骤
         self._do_step(i)
-        
+      
         # 更新状态
         self.report_status({
             "status": "processing",
@@ -710,13 +719,13 @@ def long_task(self, **_):
             "progress": (i + 1) / total_steps * 100,
             "message": f"处理中: {i + 1}/{total_steps}"
         })
-    
+  
     # 完成
     self.report_status({
         "status": "completed",
         "message": "任务完成"
     })
-    
+  
     return {"completed": True}
 ```
 
@@ -795,6 +804,7 @@ self.ctx.push_message(
 #### 5.3.4 优先级说明
 
 优先级范围：0-10
+
 - `0-2`: 低优先级（信息性消息）
 - `3-5`: 中优先级（一般通知）
 - `6-8`: 高优先级（重要通知）
@@ -811,12 +821,12 @@ class MyPlugin(NekoPluginBase):
         super().__init__(ctx)
         self.config_path = ctx.config_path
         self._load_config()
-    
+  
     def _load_config(self):
         """加载插件配置"""
         # config_path 指向 plugin.toml 文件
         config_dir = self.config_path.parent
-        
+      
         # 可以读取额外的配置文件
         custom_config_path = config_dir / "config.json"
         if custom_config_path.exists():
@@ -852,14 +862,14 @@ from plugin.sdk.decorators import (
 @neko_plugin
 class FileProcessorPlugin(NekoPluginBase):
     """文件处理插件"""
-    
+  
     def __init__(self, ctx: Any):
         super().__init__(ctx)
         self.logger = ctx.logger
         self.work_dir = Path("/tmp/file_processor")
         self.work_dir.mkdir(exist_ok=True)
         self.processed_count = 0
-    
+  
     @lifecycle(id="startup")
     def startup(self, **_):
         """启动时初始化"""
@@ -869,19 +879,19 @@ class FileProcessorPlugin(NekoPluginBase):
             "work_dir": str(self.work_dir)
         })
         return {"status": "ready"}
-    
+  
     @lifecycle(id="shutdown")
     def shutdown(self, **_):
         """关闭时清理"""
         self.logger.info("FileProcessorPlugin shutting down...")
-        
+      
         # 清理临时文件
         if self.work_dir.exists():
             shutil.rmtree(self.work_dir)
-        
+      
         self.report_status({"status": "stopped"})
         return {"status": "stopped"}
-    
+  
     @plugin_entry(
         id="process_file",
         name="Process File",
@@ -918,16 +928,16 @@ class FileProcessorPlugin(NekoPluginBase):
     ):
         """处理文件"""
         options = options or {}
-        
+      
         self.logger.info(f"Processing file: {file_path}, operation: {operation}")
-        
+      
         # 更新状态
         self.report_status({
             "status": "processing",
             "file": file_path,
             "operation": operation
         })
-        
+      
         try:
             # 执行处理
             if operation == "compress":
@@ -938,9 +948,9 @@ class FileProcessorPlugin(NekoPluginBase):
                 result = self._convert_file(file_path, options)
             else:
                 raise ValueError(f"Unknown operation: {operation}")
-            
+          
             self.processed_count += 1
-            
+          
             # 推送成功消息
             self.ctx.push_message(
                 source="file_processor",
@@ -954,21 +964,21 @@ class FileProcessorPlugin(NekoPluginBase):
                     "size": result.get("size")
                 }
             )
-            
+          
             # 更新状态
             self.report_status({
                 "status": "completed",
                 "processed_count": self.processed_count
             })
-            
+          
             return {
                 "success": True,
                 "result": result
             }
-            
+          
         except Exception as e:
             self.logger.exception(f"Error processing file: {e}")
-            
+          
             # 推送错误消息
             self.ctx.push_message(
                 source="file_processor",
@@ -981,12 +991,12 @@ class FileProcessorPlugin(NekoPluginBase):
                     "error": str(e)
                 }
             )
-            
+          
             return {
                 "success": False,
                 "error": str(e)
             }
-    
+  
     def _compress_file(self, file_path: str, options: dict) -> dict:
         """压缩文件"""
         # 实现压缩逻辑
@@ -996,7 +1006,7 @@ class FileProcessorPlugin(NekoPluginBase):
             "output_path": output_path,
             "size": os.path.getsize(output_path)
         }
-    
+  
     def _extract_file(self, file_path: str, options: dict) -> dict:
         """解压文件"""
         # 实现解压逻辑
@@ -1006,7 +1016,7 @@ class FileProcessorPlugin(NekoPluginBase):
             "output_path": output_dir,
             "size": 0
         }
-    
+  
     def _convert_file(self, file_path: str, options: dict) -> dict:
         """转换文件"""
         # 实现转换逻辑
@@ -1017,7 +1027,7 @@ class FileProcessorPlugin(NekoPluginBase):
             "output_path": output_path,
             "size": os.path.getsize(output_path)
         }
-    
+  
     @timer_interval(
         id="cleanup_temp_files",
         seconds=3600,  # 每小时执行一次
@@ -1027,10 +1037,10 @@ class FileProcessorPlugin(NekoPluginBase):
     def cleanup_temp_files(self, **_):
         """定期清理临时文件"""
         self.logger.info("Cleaning up temporary files...")
-        
+      
         # 清理超过24小时的文件
         # ... 清理逻辑 ...
-        
+      
         self.ctx.push_message(
             source="file_processor",
             message_type="text",
@@ -1039,11 +1049,12 @@ class FileProcessorPlugin(NekoPluginBase):
             content="已清理临时文件",
             metadata={"cleaned_count": 10}
         )
-        
+      
         return {"cleaned": True}
 ```
 
 **配置文件 `plugin.toml`:**
+
 ```toml
 [plugin]
 id = "file_processor"
@@ -1069,13 +1080,13 @@ from plugin.sdk.decorators import neko_plugin, plugin_entry, lifecycle
 @neko_plugin
 class APIClientPlugin(NekoPluginBase):
     """API客户端插件"""
-    
+  
     def __init__(self, ctx: Any):
         super().__init__(ctx)
         self.logger = ctx.logger
         self.session: Optional[aiohttp.ClientSession] = None
         self.base_url = "https://api.example.com"
-    
+  
     @lifecycle(id="startup")
     async def startup(self, **_):
         """启动时创建HTTP会话"""
@@ -1083,7 +1094,7 @@ class APIClientPlugin(NekoPluginBase):
         self.session = aiohttp.ClientSession()
         self.report_status({"status": "ready"})
         return {"status": "ready"}
-    
+  
     @lifecycle(id="shutdown")
     async def shutdown(self, **_):
         """关闭时清理会话"""
@@ -1092,7 +1103,7 @@ class APIClientPlugin(NekoPluginBase):
             await self.session.close()
         self.report_status({"status": "stopped"})
         return {"status": "stopped"}
-    
+  
     @plugin_entry(
         id="fetch_data",
         name="Fetch Data",
@@ -1137,18 +1148,18 @@ class APIClientPlugin(NekoPluginBase):
         """从API获取数据"""
         if not self.session:
             raise RuntimeError("Session not initialized")
-        
+      
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        
+      
         self.logger.info(f"Fetching data from {url}")
-        
+      
         # 更新状态
         self.report_status({
             "status": "fetching",
             "url": url,
             "method": method
         })
-        
+      
         try:
             async with self.session.request(
                 method=method,
@@ -1166,10 +1177,10 @@ class APIClientPlugin(NekoPluginBase):
                         status=response.status,
                         message=error_text
                     )
-                
+              
                 # 解析响应
                 result = await response.json()
-                
+              
                 # 推送成功消息
                 self.ctx.push_message(
                     source="api_client",
@@ -1183,22 +1194,22 @@ class APIClientPlugin(NekoPluginBase):
                         "data_size": len(str(result))
                     }
                 )
-                
+              
                 # 更新状态
                 self.report_status({
                     "status": "completed",
                     "endpoint": endpoint
                 })
-                
+              
                 return {
                     "success": True,
                     "data": result,
                     "status": response.status
                 }
-                
+              
         except aiohttp.ClientError as e:
             self.logger.error(f"API request failed: {e}")
-            
+          
             # 推送错误消息
             self.ctx.push_message(
                 source="api_client",
@@ -1211,12 +1222,12 @@ class APIClientPlugin(NekoPluginBase):
                     "error": str(e)
                 }
             )
-            
+          
             return {
                 "success": False,
                 "error": str(e)
             }
-    
+  
     @plugin_entry(
         id="batch_fetch",
         name="Batch Fetch",
@@ -1248,21 +1259,21 @@ class APIClientPlugin(NekoPluginBase):
     ):
         """批量获取数据"""
         self.logger.info(f"Batch fetching {len(endpoints)} endpoints")
-        
+      
         # 创建信号量限制并发
         semaphore = asyncio.Semaphore(concurrent)
-        
+      
         async def fetch_with_limit(endpoint: str):
             async with semaphore:
                 return await self.fetch_data(endpoint)
-        
+      
         # 并发执行
         tasks = [fetch_with_limit(ep) for ep in endpoints]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+      
         # 处理结果
         success_count = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
-        
+      
         self.ctx.push_message(
             source="api_client",
             message_type="text",
@@ -1275,7 +1286,7 @@ class APIClientPlugin(NekoPluginBase):
                 "failed": len(endpoints) - success_count
             }
         )
-        
+      
         return {
             "success": True,
             "results": results,
@@ -1307,7 +1318,7 @@ from plugin.sdk.decorators import (
 @neko_plugin
 class DataCollectorPlugin(NekoPluginBase):
     """数据采集插件"""
-    
+  
     def __init__(self, ctx: Any):
         super().__init__(ctx)
         self.logger = ctx.logger
@@ -1315,7 +1326,7 @@ class DataCollectorPlugin(NekoPluginBase):
         self.data_dir.mkdir(exist_ok=True)
         self.collection_count = 0
         self.last_collection_time: Optional[datetime] = None
-    
+  
     @lifecycle(id="startup")
     def startup(self, **_):
         """启动时初始化"""
@@ -1325,7 +1336,7 @@ class DataCollectorPlugin(NekoPluginBase):
             "data_dir": str(self.data_dir)
         })
         return {"status": "ready"}
-    
+  
     @plugin_entry(
         id="collect",
         name="Collect Data",
@@ -1348,30 +1359,30 @@ class DataCollectorPlugin(NekoPluginBase):
     def collect(self, source: str, filters: Optional[Dict] = None, **_):
         """采集数据"""
         self.logger.info(f"Collecting data from source: {source}")
-        
+      
         filters = filters or {}
-        
+      
         # 更新状态
         self.report_status({
             "status": "collecting",
             "source": source
         })
-        
+      
         try:
             # 模拟数据采集
             data = self._fetch_data(source, filters)
-            
+          
             # 保存数据
             timestamp = datetime.now().isoformat()
             filename = f"{source}_{timestamp}.json"
             filepath = self.data_dir / filename
-            
+          
             with open(filepath, 'w') as f:
                 json.dump(data, f, indent=2)
-            
+          
             self.collection_count += 1
             self.last_collection_time = datetime.now()
-            
+          
             # 推送消息
             self.ctx.push_message(
                 source="data_collector",
@@ -1386,24 +1397,24 @@ class DataCollectorPlugin(NekoPluginBase):
                     "timestamp": timestamp
                 }
             )
-            
+          
             # 更新状态
             self.report_status({
                 "status": "completed",
                 "collection_count": self.collection_count,
                 "last_collection": timestamp
             })
-            
+          
             return {
                 "success": True,
                 "data_count": len(data),
                 "file": filename,
                 "timestamp": timestamp
             }
-            
+          
         except Exception as e:
             self.logger.exception(f"Error collecting data: {e}")
-            
+          
             self.ctx.push_message(
                 source="data_collector",
                 message_type="text",
@@ -1415,12 +1426,12 @@ class DataCollectorPlugin(NekoPluginBase):
                     "error": str(e)
                 }
             )
-            
+          
             return {
                 "success": False,
                 "error": str(e)
             }
-    
+  
     def _fetch_data(self, source: str, filters: Dict) -> List[Dict]:
         """获取数据（模拟）"""
         # 实际实现中，这里会调用真实的API或数据库
@@ -1428,7 +1439,7 @@ class DataCollectorPlugin(NekoPluginBase):
             {"id": 1, "name": "Item 1", "value": 100},
             {"id": 2, "name": "Item 2", "value": 200},
         ]
-    
+  
     @timer_interval(
         id="auto_collect",
         seconds=300,  # 每5分钟执行一次
@@ -1438,10 +1449,10 @@ class DataCollectorPlugin(NekoPluginBase):
     def auto_collect(self, **_):
         """自动采集数据"""
         self.logger.info("Running auto collection...")
-        
+      
         # 从配置中获取数据源列表
         sources = ["source1", "source2", "source3"]
-        
+      
         results = []
         for source in sources:
             try:
@@ -1449,9 +1460,9 @@ class DataCollectorPlugin(NekoPluginBase):
                 results.append(result)
             except Exception as e:
                 self.logger.error(f"Auto collect failed for {source}: {e}")
-        
+      
         success_count = sum(1 for r in results if r.get("success"))
-        
+      
         self.ctx.push_message(
             source="data_collector",
             message_type="text",
@@ -1463,9 +1474,9 @@ class DataCollectorPlugin(NekoPluginBase):
                 "success_count": success_count
             }
         )
-        
+      
         return {"collected": success_count, "total": len(sources)}
-    
+  
     @plugin_entry(
         id="get_stats",
         name="Get Statistics",
@@ -1475,7 +1486,7 @@ class DataCollectorPlugin(NekoPluginBase):
         """获取统计信息"""
         # 统计文件数量
         json_files = list(self.data_dir.glob("*.json"))
-        
+      
         return {
             "collection_count": self.collection_count,
             "file_count": len(json_files),
@@ -1512,10 +1523,10 @@ async def parallel_tasks(self, urls: list, **_):
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 return await response.json()
-    
+  
     tasks = [fetch_url(url) for url in urls]
     results = await asyncio.gather(*tasks)
-    
+  
     return {"results": results}
 ```
 
@@ -1533,14 +1544,14 @@ class ThreadSafePlugin(NekoPluginBase):
         super().__init__(ctx)
         self._lock = threading.Lock()
         self._shared_data = {}
-    
+  
     @plugin_entry(id="update_data")
     def update_data(self, key: str, value: Any, **_):
         """线程安全地更新数据"""
         with self._lock:
             self._shared_data[key] = value
             return {"updated": True}
-    
+  
     @plugin_entry(id="get_data")
     def get_data(self, key: str, **_):
         """线程安全地获取数据"""
@@ -1576,7 +1587,7 @@ class ConfigurablePlugin(NekoPluginBase):
     def __init__(self, ctx):
         super().__init__(ctx)
         self._load_config()
-    
+  
     def _load_config(self):
         """加载配置"""
         config_file = self.ctx.config_path.parent / "config.json"
@@ -1588,12 +1599,12 @@ class ConfigurablePlugin(NekoPluginBase):
                 "default_value": "default",
                 "timeout": 30
             }
-    
+  
     @plugin_entry(id="get_config")
     def get_config(self, **_):
         """获取配置"""
         return {"config": self.config}
-    
+  
     @plugin_entry(id="update_config")
     def update_config(self, key: str, value: Any, **_):
         """更新配置"""
@@ -1616,7 +1627,7 @@ class PersistentPlugin(NekoPluginBase):
         super().__init__(ctx)
         self.db_path = ctx.config_path.parent / "data.db"
         self._init_database()
-    
+  
     def _init_database(self):
         """初始化数据库"""
         conn = sqlite3.connect(self.db_path)
@@ -1630,7 +1641,7 @@ class PersistentPlugin(NekoPluginBase):
         """)
         conn.commit()
         conn.close()
-    
+  
     @plugin_entry(id="save_data")
     def save_data(self, key: str, value: str, **_):
         """保存数据"""
@@ -1642,7 +1653,7 @@ class PersistentPlugin(NekoPluginBase):
         conn.commit()
         conn.close()
         return {"saved": True}
-    
+  
     @plugin_entry(id="load_data")
     def load_data(self, key: str, **_):
         """加载数据"""
@@ -1669,15 +1680,15 @@ class WellOrganizedPlugin(NekoPluginBase):
     def __init__(self, ctx):
         super().__init__(ctx)
         self._initialize()
-    
+  
     def _initialize(self):
         """初始化逻辑"""
         pass
-    
+  
     def _helper_method(self):
         """辅助方法（私有）"""
         pass
-    
+  
     @plugin_entry(id="public_method")
     def public_method(self, **_):
         """公开方法"""
@@ -1702,12 +1713,12 @@ def robust_task(self, param: str, **_):
         # 参数验证
         if not param:
             raise ValueError("param is required")
-        
+      
         # 业务逻辑
         result = self._do_work(param)
-        
+      
         return {"success": True, "result": result}
-        
+      
     except ValueError as e:
         self.logger.warning(f"Validation error: {e}")
         return {"success": False, "error": str(e)}
@@ -1752,18 +1763,18 @@ def bad_logging(self, **_):
 @plugin_entry(id="good_status")
 def good_status(self, **_):
     self.report_status({"status": "starting"})
-    
+  
     # 执行步骤1
     self._step1()
     self.report_status({"status": "step1_complete", "progress": 33})
-    
+  
     # 执行步骤2
     self._step2()
     self.report_status({"status": "step2_complete", "progress": 66})
-    
+  
     # 完成
     self.report_status({"status": "completed", "progress": 100})
-    
+  
     return {"success": True}
 
 # ❌ 不好的实践：不更新状态
@@ -1890,6 +1901,7 @@ A: 可以，使用任何 Python 数据库库（如 `sqlite3`、`psycopg2`、`pym
 ### 10.1 装饰器
 
 #### @neko_plugin
+
 ```python
 @neko_plugin
 class MyPlugin(NekoPluginBase):
@@ -1897,6 +1909,7 @@ class MyPlugin(NekoPluginBase):
 ```
 
 #### @plugin_entry
+
 ```python
 @plugin_entry(
     id: str,                    # 入口点ID
@@ -1910,6 +1923,7 @@ class MyPlugin(NekoPluginBase):
 ```
 
 #### @lifecycle
+
 ```python
 @lifecycle(
     id: Literal["startup", "shutdown", "reload"],  # 生命周期事件
@@ -1920,6 +1934,7 @@ class MyPlugin(NekoPluginBase):
 ```
 
 #### @timer_interval
+
 ```python
 @timer_interval(
     id: str,                    # 定时器ID
@@ -1932,6 +1947,7 @@ class MyPlugin(NekoPluginBase):
 ```
 
 #### @message
+
 ```python
 @message(
     id: str,                    # 消息处理器ID
@@ -1944,6 +1960,7 @@ class MyPlugin(NekoPluginBase):
 ```
 
 #### @on_event
+
 ```python
 @on_event(
     event_type: str,            # 事件类型
@@ -1960,18 +1977,21 @@ class MyPlugin(NekoPluginBase):
 ### 10.2 基类方法
 
 #### NekoPluginBase.get_input_schema()
+
 ```python
 def get_input_schema(self) -> Dict[str, Any]:
     """获取输入模式"""
 ```
 
 #### NekoPluginBase.report_status()
+
 ```python
 def report_status(self, status: Dict[str, Any]) -> None:
     """上报状态"""
 ```
 
 #### NekoPluginBase.collect_entries()
+
 ```python
 def collect_entries(self) -> Dict[str, EventHandler]:
     """收集入口点"""
@@ -1980,12 +2000,14 @@ def collect_entries(self) -> Dict[str, EventHandler]:
 ### 10.3 上下文方法
 
 #### PluginContext.update_status()
+
 ```python
 def update_status(self, status: Dict[str, Any]) -> None:
     """更新状态"""
 ```
 
 #### PluginContext.push_message()
+
 ```python
 def push_message(
     self,
@@ -2092,4 +2114,3 @@ entry = "plugins.my_plugin:MyPlugin"
 这份教程涵盖了 N.E.K.O 插件系统开发的所有核心内容。如果你有任何问题或建议，欢迎反馈！
 
 **祝你开发愉快！** 🚀
-

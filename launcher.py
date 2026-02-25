@@ -42,7 +42,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict
 from multiprocessing import Process, freeze_support, Event
-from config import APP_NAME, MAIN_SERVER_PORT, MEMORY_SERVER_PORT, TOOL_SERVER_PORT
+from config import APP_NAME, MAIN_SERVER_PORT, MEMORY_SERVER_PORT, TOOL_SERVER_PORT, USER_PLUGIN_SERVER_PORT
 from utils.port_utils import (
     probe_neko_health,
     acquire_startup_lock,
@@ -65,6 +65,7 @@ DEFAULT_PORTS = {
     "MAIN_SERVER_PORT": MAIN_SERVER_PORT,
     "MEMORY_SERVER_PORT": MEMORY_SERVER_PORT,
     "TOOL_SERVER_PORT": TOOL_SERVER_PORT,
+    "USER_PLUGIN_SERVER_PORT": USER_PLUGIN_SERVER_PORT,
 }
 INTERNAL_DEFAULT_PORTS = {
     "AGENT_MQ_PORT": 48917,
@@ -78,6 +79,7 @@ MODULE_TO_PORT_KEY: dict[str, str] = {
     "memory_server": "MEMORY_SERVER_PORT",
     "agent_server": "TOOL_SERVER_PORT",
     "main_server": "MAIN_SERVER_PORT",
+    "plugin_server": "USER_PLUGIN_SERVER_PORT",
 }
 
 
@@ -245,6 +247,13 @@ SERVERS = [
         'ready_event': None,
     },
     {
+        'name': 'Plugin Server', 
+        'module': 'plugin_server',
+        'port': USER_PLUGIN_SERVER_PORT,
+        'process': None,
+        'ready_event': None,
+    },
+    {
         'name': 'Main Server',
         'module': 'main_server',
         'port': MAIN_SERVER_PORT,
@@ -355,6 +364,42 @@ def run_agent_server(ready_event: Event):
         uvicorn.run(agent_server.app, host="127.0.0.1", port=TOOL_SERVER_PORT, log_level="error")
     except Exception as e:
         print(f"Agent Server error: {e}")
+        import traceback
+        traceback.print_exc()
+
+def run_plugin_server(ready_event: Event):
+    """运行 Plugin Server"""
+    try:
+        # 确保工作目录正确
+        if getattr(sys, 'frozen', False):
+            if hasattr(sys, '_MEIPASS'):
+                # PyInstaller
+                os.chdir(sys._MEIPASS)
+            else:
+                # Nuitka
+                os.chdir(os.path.dirname(os.path.abspath(__file__)))
+            # 禁用 typeguard（子进程需要重新禁用）
+            try:
+                import typeguard
+                def dummy_typechecked(func=None, **kwargs):
+                    return func if func else (lambda f: f)
+                typeguard.typechecked = dummy_typechecked
+                if hasattr(typeguard, '_decorators'):
+                    typeguard._decorators.typechecked = dummy_typechecked
+            except: # noqa
+                pass
+        
+        import plugin.user_plugin_server
+        import uvicorn
+        
+        print(f"[Plugin Server] Starting on port {USER_PLUGIN_SERVER_PORT}")
+        
+        # Plugin Server 不需要等待，立即通知就绪
+        ready_event.set()
+        
+        uvicorn.run(plugin.user_plugin_server.app, host="127.0.0.1", port=USER_PLUGIN_SERVER_PORT, log_level="error")
+    except Exception as e:
+        print(f"Plugin Server error: {e}")
         import traceback
         traceback.print_exc()
 
@@ -523,7 +568,7 @@ def apply_port_strategy() -> bool | str:
     1. 默认端口若已是 N.E.K.O 服务，则视为可复用。
     2. 若被 Hyper-V/WSL 保留或其他进程占用，则选择 fallback 端口。
     """
-    global MAIN_SERVER_PORT, MEMORY_SERVER_PORT, TOOL_SERVER_PORT
+    global MAIN_SERVER_PORT, MEMORY_SERVER_PORT, TOOL_SERVER_PORT, USER_PLUGIN_SERVER_PORT
     chosen: dict[str, int] = {}
     chosen_internal: dict[str, int] = {}
     fallback_details: list[dict] = []
@@ -535,7 +580,7 @@ def apply_port_strategy() -> bool | str:
     if excluded_ranges:
         print(f"[Launcher] Detected {len(excluded_ranges)} Hyper-V/WSL excluded port range(s)", flush=True)
 
-    for key in ("MEMORY_SERVER_PORT", "TOOL_SERVER_PORT", "MAIN_SERVER_PORT"):
+    for key in ("MEMORY_SERVER_PORT", "TOOL_SERVER_PORT", "USER_PLUGIN_SERVER_PORT", "MAIN_SERVER_PORT"):
         preferred = int(DEFAULT_PORTS[key])
         if preferred not in reserved and _is_port_bindable(preferred):
             chosen[key] = preferred
@@ -585,6 +630,7 @@ def apply_port_strategy() -> bool | str:
     MAIN_SERVER_PORT = chosen["MAIN_SERVER_PORT"]
     MEMORY_SERVER_PORT = chosen["MEMORY_SERVER_PORT"]
     TOOL_SERVER_PORT = chosen["TOOL_SERVER_PORT"]
+    USER_PLUGIN_SERVER_PORT = chosen["USER_PLUGIN_SERVER_PORT"]
 
     for key, preferred in INTERNAL_DEFAULT_PORTS.items():
         if preferred not in reserved and _is_port_bindable(preferred):
@@ -715,6 +761,8 @@ def start_server(server: Dict) -> bool:
             target_func = run_memory_server
         elif server['module'] == 'agent_server':
             target_func = run_agent_server
+        elif server['module'] == 'plugin_server':
+            target_func = run_plugin_server
         elif server['module'] == 'main_server':
             target_func = run_main_server
         else:

@@ -1384,6 +1384,210 @@ async def proactive_chat(request: Request):
         }, status_code=500)
 
 
+@router.post('/plugin/ai_reply')
+async def plugin_ai_reply(request: Request):
+    """
+    泛化的插件 AI 回复接口
+    
+    功能：
+    1. 接收来自插件的外部消息
+    2. 将消息发送给 AI 处理
+    3. 通过泛化接口将 AI 回复发送回插件
+    
+    请求格式：
+    {
+        "plugin_id": "插件标识符",
+        "message": "用户消息内容",
+        "metadata": {
+            "sender_id": "发送者ID",
+            "sender_name": "发送者昵称",
+            "message_type": "消息类型（如 private/group）",
+            "target_id": "目标ID"
+        }
+    }
+    
+    响应格式：
+    {
+        "success": true,
+        "reply": "AI 回复内容",
+        "processed": true
+    }
+    """
+    try:
+        data = await request.json()
+        plugin_id = data.get("plugin_id")
+        message = data.get("message")
+        metadata = data.get("metadata", {})
+        
+        if not plugin_id or not message:
+            return JSONResponse({
+                "success": False,
+                "error": "缺少必要参数: plugin_id 或 message"
+            }, status_code=400)
+        
+        # 检查用户插件是否启用（通过 HTTP 请求获取真实状态）
+        from config import TOOL_SERVER_PORT
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=1.0) as client:
+                response = await client.get(f"http://127.0.0.1:{TOOL_SERVER_PORT}/agent/flags")
+                if response.status_code == 200:
+                    data = response.json()
+                    if not data.get("success", False):
+                        logger.warning(f"⚠️ 获取 agent flags 失败: {data.get('error', '未知错误')}")
+                        return JSONResponse({
+                            "success": False,
+                            "error": "无法获取插件状态"
+                        }, status_code=503)
+                    agent_flags = data.get("agent_flags", {})
+                    if not agent_flags.get("user_plugin_enabled", False):
+                        logger.info(f"⚠️ 用户插件功能已禁用，拒绝处理插件消息: plugin_id={plugin_id}")
+                        return JSONResponse({
+                            "success": False,
+                            "error": "用户插件功能已禁用"
+                        }, status_code=403)
+                else:
+                    logger.warning(f"⚠️ 获取 agent flags HTTP 错误: {response.status_code}")
+                    return JSONResponse({
+                        "success": False,
+                        "error": "无法获取插件状态"
+                    }, status_code=503)
+        except Exception as e:
+            logger.error(f"❌ 检查插件状态时出错: {e}")
+            return JSONResponse({
+                "success": False,
+                "error": "无法获取插件状态"
+            }, status_code=503)
+        
+        logger.info(f"📨 收到插件 AI 回复请求: plugin_id={plugin_id}, message={message[:100]}")
+        
+        # 获取当前活跃的 session_manager
+        session_mgr = get_session_manager()
+        if not session_mgr:
+            return JSONResponse({
+                "success": False,
+                "error": "没有活跃的会话"
+            }, status_code=503)
+        
+        # 获取第一个可用的 session（默认角色）
+        lanlan_name = list(session_mgr.keys())[0] if session_mgr else None
+        if not lanlan_name:
+            return JSONResponse({
+                "success": False,
+                "error": "没有可用的角色"
+            }, status_code=503)
+        
+        mgr = session_mgr[lanlan_name]
+        
+        # 直接使用插件提供的消息内容，由插件自行构造上下文
+        # 插件可以在 message 字段中包含所需的上下文信息
+        context_prompt = message
+        
+        # 使用 AI 处理消息
+        # 这里我们直接调用 session 的 stream_text 方法
+        try:
+            # 确保会话已启动
+            if not mgr.session or not mgr.is_active:
+                await mgr.start_session(mgr.websocket, new=False, input_mode='text')
+            
+            # 捕获 AI 响应
+            response_accumulator = []
+            response_done_event = asyncio.Event()
+            
+            async def on_text_delta(text, is_first):
+                """捕获 AI 生成的文本"""
+                response_accumulator.append(text)
+            
+            async def on_response_done():
+                """响应完成时触发"""
+                response_done_event.set()
+            
+            # 保存原始回调
+            original_on_text_delta = mgr.session.on_text_delta
+            original_on_response_done = mgr.session.on_response_done
+            
+            # 设置临时回调
+            mgr.session.on_text_delta = on_text_delta
+            mgr.session.on_response_done = on_response_done
+            
+            # 发送消息给 AI
+            await mgr.session.stream_text(context_prompt)
+            
+            # 等待响应完成（最多 30 秒）
+            try:
+                await asyncio.wait_for(response_done_event.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"⚠️ AI 响应超时: source={plugin_id}")
+            
+            # 恢复原始回调
+            mgr.session.on_text_delta = original_on_text_delta
+            mgr.session.on_response_done = original_on_response_done
+            
+            # 获取完整响应
+            full_response = "".join(response_accumulator)
+            
+            if full_response:
+                logger.info(f"✅ AI 响应已生成: source={plugin_id}, reply={full_response[:50]}...")
+                
+                # 将 AI 回复推送到消息队列，由插件自己消费
+                try:
+                    from plugin.core.state import state
+                    
+                    # 构造回复消息
+                    reply_message = {
+                        "type": "ai_reply",
+                        "source": plugin_id,
+                        "reply": full_response,
+                        "metadata": metadata
+                    }
+                    
+                    # 推送到插件的消息队列
+                    await state.message_queue.put({
+                        "source": "main_system",
+                        "message_type": "ai_reply",
+                        "description": f"AI 回复给 {plugin_id}",
+                        "priority": 1,
+                        "content": reply_message
+                    })
+                    
+                    logger.info(f"✅ AI 回复已推送到消息队列: source={plugin_id}")
+                    return JSONResponse({
+                        "success": True,
+                        "message": "AI 回复已发送",
+                        "reply": full_response,
+                        "processed": True
+                    })
+                        
+                except Exception as e:
+                    logger.exception(f"❌ 推送 AI 回复到队列异常: {e}")
+                    return JSONResponse({
+                        "success": False,
+                        "error": "发送回复失败",
+                        "detail": str(e)
+                    }, status_code=500)
+            else:
+                logger.warning(f"⚠️ AI 未生成响应: source={plugin_id}")
+                return JSONResponse({
+                    "success": False,
+                    "error": "AI 未生成响应"
+                }, status_code=500)
+            
+        except Exception as e:
+            logger.exception(f"❌ 处理消息失败: {e}")
+            return JSONResponse({
+                "success": False,
+                "error": f"处理消息失败: {str(e)}"
+            }, status_code=500)
+            
+    except Exception as e:
+        logger.exception(f"❌ AI 回复接口异常: {e}")
+        return JSONResponse({
+            "success": False,
+            "error": "服务器内部错误",
+            "detail": str(e)
+        }, status_code=500)
+
+
 
 
 

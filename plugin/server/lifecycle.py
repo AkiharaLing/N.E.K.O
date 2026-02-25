@@ -18,6 +18,9 @@ from plugin.settings import (
 
 logger = logging.getLogger("user_plugin_server")
 
+# 全局消息路由器
+plugin_message_router = None
+
 
 def _factory(pid: str, entry: str, config_path: Path) -> PluginProcessHost:
     """插件进程宿主工厂函数"""
@@ -48,6 +51,16 @@ async def startup() -> None:
             logger.debug(f"Started communication resources for plugin {plugin_id}")
         except Exception as e:
             logger.exception(f"Failed to start communication resources for plugin {plugin_id}: {e}")
+    
+    # 启动全局反向消息路由器
+    try:
+        from plugin.message_router import get_message_router
+        global plugin_message_router
+        plugin_message_router = get_message_router()
+        await plugin_message_router.start()
+        logger.info("✅ 插件消息路由器已启动")
+    except Exception as e:
+        logger.warning(f"插件消息路由器启动失败: {e}")
     
     # 启动状态消费任务
     await status_manager.start_status_consumer(

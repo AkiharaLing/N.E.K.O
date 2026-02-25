@@ -145,6 +145,27 @@ def _plugin_process_runner(
             if msg["type"] == "STOP":
                 break
 
+            if msg["type"] == "MESSAGE":
+                content = msg.get("content", {})
+                msg_source = msg.get("source", "")
+                
+                # 查找匹配的消息处理器
+                message_events = events_by_type.get("message", {})
+                for eid, fn in message_events.items():
+                    meta = getattr(fn, EVENT_META_ATTR, None)
+                    if meta:
+                        handler_source = getattr(meta, "extra", {}).get("source")
+                        if handler_source and handler_source == msg_source:
+                            try:
+                                if asyncio.iscoroutinefunction(fn):
+                                    asyncio.run(fn(**content))
+                                else:
+                                    fn(**content)
+                                logger.info("Message handler '%s' executed for source '%s'", eid, msg_source)
+                            except Exception as e:
+                                logger.exception("Message handler '%s' failed: %s", eid, e)
+                            break
+
             if msg["type"] == "TRIGGER":
                 entry_id = msg["entry_id"]
                 args = msg["args"]
@@ -332,6 +353,36 @@ class PluginProcessHost:
         委托给通信资源管理器处理
         """
         return await self.comm_manager.trigger(entry_id, args, timeout)
+    
+    async def start_reverse_message_consumer(self, source_queue: asyncio.Queue, source_filter: str = None) -> None:
+        """
+        启动反向消息消费后台任务
+        
+        从主进程的消息队列中读取消息并发送到插件的 cmd_queue
+        
+        Args:
+            source_queue: 主进程的消息队列
+            source_filter: 消息来源过滤器（只处理匹配来源的消息）
+        """
+        await self.comm_manager.start_reverse_message_consumer(source_queue, source_filter)
+    
+    async def send_message(self, source: str, content: dict) -> None:
+        """
+        发送 MESSAGE 命令到子进程（不等待结果）
+        
+        Args:
+            source: 消息来源（用于匹配插件的消息处理器）
+            content: 消息内容（字典）
+        """
+        try:
+            self.cmd_queue.put({
+                "type": "MESSAGE",
+                "source": source,
+                "content": content
+            }, timeout=QUEUE_GET_TIMEOUT)
+            self.logger.debug(f"Sent MESSAGE to plugin {self.plugin_id} from source '{source}'")
+        except Exception as e:
+            self.logger.warning(f"Failed to send MESSAGE to plugin {self.plugin_id}: {e}")
     
     def is_alive(self) -> bool:
         """检查进程是否存活"""

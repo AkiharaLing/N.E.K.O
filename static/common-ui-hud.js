@@ -124,6 +124,13 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
             labelKey: 'settings.toggles.browserUse',
             initialDisabled: true,
             initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+        },
+        {
+            id: 'agent-user-plugin',
+            label: window.t ? window.t('settings.toggles.userPlugin') : '用户插件',
+            labelKey: 'settings.toggles.userPlugin',
+            initialDisabled: true,
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
         }
     ];
 
@@ -134,7 +141,7 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
 
     // 添加适配中的按钮（不可选）
     const adaptingItems = [
-        { labelKey: 'settings.toggles.userPluginAdapting', fallback: '用户插件（开发中）' },
+        //{ labelKey: 'settings.toggles.userPluginAdapting', fallback: '用户插件（开发中）' },
         { labelKey: 'settings.toggles.moltbotAdapting', fallback: 'moltbot（开发中）' }
     ];
 

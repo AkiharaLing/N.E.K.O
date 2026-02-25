@@ -1,0 +1,28 @@
+[plugin]
+id = "napcat_qq"
+name = "NapCatQQ 通信插件"
+description = "通过 NapCatQQ 接口实现 QQ 消息收发、好友/群管理"
+version = "0.0.1"
+entry = "plugin.plugins.napcat_qq:NapCatQQPlugin"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+untested = ">=0.3.0,<0.4.0"
+conflicts = ["<0.1.0", ">=0.4.0"]
+
+# 自定义配置（可在插件中读取）
+[plugin.config]
+napcat_host = "127.0.0.1"
+napcat_port = 3001
+qq_account = 3189639201  # 你的QQ账号（用于多账号区分）
+master_qq = 0  # 主人QQ号（设置为0表示不启用主人识别，或填写具体QQ号）
+
+# 自动回复配置
+[plugin.config.auto_reply]
+enabled = true  # 是否启用自动回复
+reply_private = true  # 是否回复私聊消息
+reply_group = false  # 是否回复群聊消息
+reply_mention = true  # 是否只回复@消息（群聊模式下）
+max_reply_length = 500  # 最大回复长度
+cooldown_seconds = 3  # 消息冷却时间（秒）

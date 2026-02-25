@@ -5,5 +5,6 @@ Plugin SDK 模块
 """
 
 from .version import SDK_VERSION
+from .config import PluginConfigManager
 
-__all__ = ["SDK_VERSION"]
+__all__ = ["SDK_VERSION", "PluginConfigManager"]
