@@ -1961,9 +1961,10 @@ async def plugin_ai_reply(request: Request):
             if full_response:
                 logger.info(f"✅ AI 响应已生成: source={plugin_id}, reply={full_response[:50]}...")
                 
-                # 将 AI 回复推送到消息队列，由插件自己消费
+                # 将 AI 回复推送到插件服务器（通过HTTP API）
                 try:
-                    from plugin.core.state import state
+                    from config import USER_PLUGIN_SERVER_PORT
+                    import httpx
                     
                     # 构造回复消息
                     reply_message = {
@@ -1973,14 +1974,28 @@ async def plugin_ai_reply(request: Request):
                         "metadata": metadata
                     }
                     
-                    # 推送到插件的消息队列
-                    await state.message_queue.put({
-                        "source": "main_system",
-                        "message_type": "ai_reply",
-                        "description": f"AI 回复给 {plugin_id}",
-                        "priority": 1,
-                        "content": reply_message
-                    })
+                    # 通过HTTP API推送到插件服务器
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        response = await client.post(
+                            f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugin/push",
+                            json={
+                                "plugin_id": plugin_id,
+                                "source": "main_system",
+                                "message_type": "ai_reply",
+                                "description": f"AI 回复给 {plugin_id}",
+                                "priority": 1,
+                                "content": reply_message,
+                                "metadata": metadata
+                            }
+                        )
+                        if response.status_code == 200:
+                            result = response.json()
+                            if result.get("success"):
+                                logger.info(f"✅ AI 回复已推送到插件服务器: plugin_id={plugin_id}")
+                            else:
+                                logger.warning(f"⚠️ 推送到插件服务器失败: {result}")
+                        else:
+                            logger.warning(f"⚠️ 推送到插件服务器HTTP错误: {response.status_code}")
                     
                     # 触发记忆整理：直接发送 analyze_request
                     try:
