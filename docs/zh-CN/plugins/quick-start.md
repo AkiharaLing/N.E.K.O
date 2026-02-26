@@ -55,7 +55,6 @@ class HelloWorldPlugin(NekoPluginBase):
     def __init__(self, ctx: Any):
         super().__init__(ctx)
         self.logger = ctx.logger
-<<<<<<< HEAD
         
         # Initialize configuration manager
         self.config_manager = PluginConfigManager(ctx.config_path, ctx.logger)
@@ -65,9 +64,6 @@ class HelloWorldPlugin(NekoPluginBase):
         self.default_name = self.config_manager.get_config("default_name", "World")
         
         self.logger.info(f"HelloWorldPlugin initialized with prefix: '{self.greeting_prefix}'")
-=======
-        self.logger.info("HelloWorldPlugin initialized")
->>>>>>> main
 
     @plugin_entry(
         id="greet",
