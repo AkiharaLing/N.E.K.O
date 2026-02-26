@@ -374,7 +374,7 @@ class NapCatQQPlugin(NekoPluginBase):
             # 调用主系统的 AI 回复接口
             from config import MAIN_SERVER_PORT
             
-            url = f"http://127.0.0.1:{MAIN_SERVER_PORT}/api/plugin/ai_reply"
+            url = f"http://127.0.0.1:{MAIN_SERVER_PORT}/plugin/ai_reply"
             payload = {
                 "plugin_id": self._plugin_id,
                 "message": context_prompt,

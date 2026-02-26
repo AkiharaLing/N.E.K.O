@@ -244,7 +244,7 @@ class PluginMessageRouter:
             import httpx
             from config import MAIN_SERVER_PORT
             
-            url = f"http://127.0.0.1:{MAIN_SERVER_PORT}/api/plugin/ai_reply"
+            url = f"http://127.0.0.1:{MAIN_SERVER_PORT}/plugin/ai_reply"
             payload = {
                 "plugin_id": plugin_id,
                 "message": message,
