@@ -82,17 +82,22 @@ class HelloWorldPlugin(NekoPluginBase):
     )
     def greet(self, name: str = "World", **_):
         """Greeting function"""
+<<<<<<< HEAD
         # Use configured prefix if provided
         if not name or name == "World":
             name = self.default_name
         
         message = f"{self.greeting_prefix}, {name}!"
+=======
+        message = f"Hello, {name}!"
+>>>>>>> main
         self.logger.info(f"Greeting: {message}")
         return {
             "message": message
         }
 ```
 
+<<<<<<< HEAD
 ## Step 4: Add configuration (optional)
 
 **Note: Configuration is completely optional.** Plugins can work without any custom configuration.
@@ -122,6 +127,9 @@ default_name = "N.E.K.O"
 Plugins can function without any `[plugin.config]` section. The `PluginConfigManager` will simply return default values when configuration keys are not found.
 
 ## Step 5: Test
+=======
+## Step 4: Test
+>>>>>>> main
 
 After starting the plugin server, call your plugin via HTTP:
 

@@ -55,6 +55,7 @@ class HelloWorldPlugin(NekoPluginBase):
     def __init__(self, ctx: Any):
         super().__init__(ctx)
         self.logger = ctx.logger
+<<<<<<< HEAD
         
         # Initialize configuration manager
         self.config_manager = PluginConfigManager(ctx.config_path, ctx.logger)
@@ -64,6 +65,9 @@ class HelloWorldPlugin(NekoPluginBase):
         self.default_name = self.config_manager.get_config("default_name", "World")
         
         self.logger.info(f"HelloWorldPlugin initialized with prefix: '{self.greeting_prefix}'")
+=======
+        self.logger.info("HelloWorldPlugin initialized")
+>>>>>>> main
 
     @plugin_entry(
         id="greet",
@@ -82,17 +86,22 @@ class HelloWorldPlugin(NekoPluginBase):
     )
     def greet(self, name: str = "World", **_):
         """Greeting function"""
+<<<<<<< HEAD
         # Use configured prefix if provided
         if not name or name == "World":
             name = self.default_name
         
         message = f"{self.greeting_prefix}, {name}!"
+=======
+        message = f"Hello, {name}!"
+>>>>>>> main
         self.logger.info(f"Greeting: {message}")
         return {
             "message": message
         }
 ```
 
+<<<<<<< HEAD
 ## 第四步：添加配置（可选）
 
 **注意：配置完全是可选的。** 插件可以在没有任何自定义配置的情况下工作。
@@ -122,6 +131,9 @@ default_name = "N.E.K.O"
 插件可以在没有任何 `[plugin.config]` 部分的情况下运行。当配置键不存在时，`PluginConfigManager` 会简单地返回默认值。
 
 ## 第五步：测试
+=======
+## 第四步：测试
+>>>>>>> main
 
 启动插件服务器后，通过 HTTP 调用你的插件：
 
