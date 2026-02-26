@@ -24,5 +24,6 @@ enabled = true  # 是否启用自动回复
 reply_private = true  # 是否回复私聊消息
 reply_group = false  # 是否回复群聊消息
 reply_mention = true  # 是否只回复@消息（群聊模式下）
+reply_master_only = false  # 是否仅回复主人（需要配置master_qq）
 max_reply_length = 500  # 最大回复长度
 cooldown_seconds = 3  # 消息冷却时间（秒）

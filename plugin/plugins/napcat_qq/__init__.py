@@ -37,6 +37,7 @@ class NapCatQQPlugin(NekoPluginBase):
         self.reply_private = self.config_manager.get_config("auto_reply.reply_private", True)
         self.reply_group = self.config_manager.get_config("auto_reply.reply_group", False)
         self.reply_mention = self.config_manager.get_config("auto_reply.reply_mention", True)
+        self.reply_master_only = self.config_manager.get_config("auto_reply.reply_master_only", False)
         self.max_reply_length = self.config_manager.get_config("auto_reply.max_reply_length", 500)
         self.cooldown_seconds = self.config_manager.get_config("auto_reply.cooldown_seconds", 3)
         
@@ -272,6 +273,11 @@ class NapCatQQPlugin(NekoPluginBase):
         
         # 检查是否应该回复
         should_reply = False
+        
+        # 如果启用了仅回复主人模式，非主人消息直接跳过
+        if self.reply_master_only and not is_master:
+            self.logger.debug(f"🔒 仅回复主人模式已启用，跳过非主人消息: sender_id={sender_id}")
+            return
         
         if message_type == "private" and self.reply_private:
             should_reply = True
