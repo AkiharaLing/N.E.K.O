@@ -345,14 +345,11 @@ class PluginCommunicationResourceManager:
             source_filter: 消息来源过滤器（只处理匹配来源的消息）
         """
         loop = asyncio.get_running_loop()
-        self.logger.info(f"🚀 反向消息消费者已启动: plugin_id={self.plugin_id}, source_filter={source_filter}")
         
         while not self._shutdown_event.is_set():
             try:
                 # 从主进程的消息队列中获取消息
                 msg = await asyncio.wait_for(source_queue.get(), timeout=QUEUE_GET_TIMEOUT)
-                
-                self.logger.debug(f"📨 收到消息: msg_source={msg.get('source')}, content_source={msg.get('content', {}).get('source')}, filter={source_filter}")
                 
                 # 检查消息来源过滤器
                 if source_filter:
@@ -360,9 +357,11 @@ class PluginCommunicationResourceManager:
                     content = msg.get("content", {})
                     content_source = content.get("source", "")
                     
+                    self.logger.info(f"[REVERSE MSG FILTER] plugin={self.plugin_id}, source_filter={source_filter}, msg_source={msg_source}, content_source={content_source}")
+                    
                     # 只处理匹配来源的消息
                     if msg_source != source_filter and content_source != source_filter:
-                        self.logger.debug(f"⏭️ 跳过消息: msg_source={msg_source}, content_source={content_source}, filter={source_filter}")
+                        self.logger.info(f"[REVERSE MSG SKIP] plugin={self.plugin_id}, source_filter={source_filter}, msg_source={msg_source}, content_source={content_source}")
                         continue
                 
                 # 发送 MESSAGE 命令到插件的 cmd_queue
@@ -375,7 +374,7 @@ class PluginCommunicationResourceManager:
                             "content": msg.get("content", {})
                         }, timeout=QUEUE_GET_TIMEOUT)
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         f"[REVERSE MESSAGE] Plugin: {self.plugin_id} | "
                         f"Source: {msg.get('source', 'unknown')} | "
                         f"Description: {msg.get('description', '')}"

@@ -148,13 +148,16 @@ def _plugin_process_runner(
             if msg["type"] == "MESSAGE":
                 content = msg.get("content", {})
                 msg_source = msg.get("source", "")
+                logger.info(f"[MESSAGE RECEIVED] source={msg_source}, content={content}")
                 
                 # 查找匹配的消息处理器
                 message_events = events_by_type.get("message", {})
+                logger.info(f"[MESSAGE HANDLERS] available handlers: {list(message_events.keys())}")
                 for eid, fn in message_events.items():
                     meta = getattr(fn, EVENT_META_ATTR, None)
                     if meta:
                         handler_source = getattr(meta, "extra", {}).get("source")
+                        logger.info(f"[MESSAGE CHECK] handler={eid}, handler_source={handler_source}, msg_source={msg_source}")
                         if handler_source and handler_source == msg_source:
                             try:
                                 if asyncio.iscoroutinefunction(fn):
