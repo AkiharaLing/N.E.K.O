@@ -64,14 +64,12 @@ async def lifespan(app: FastAPI):
         _set_capability("browser_use", False, "Browser Use check failed")
 
     try:
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            r = await client.get(f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugins")
-            if r.status_code == 200:
-                _set_capability("user_plugin", True, "")
-            else:
-                _set_capability("user_plugin", False, f"user_plugin server responded {r.status_code}")
+        # 插件服务器在用户点击前端开关后才会启动，所以这里始终返回 True
+        # 这样用户就可以点击开关来启动插件服务器
+        _set_capability("user_plugin", True, "")
     except Exception as e:
-        _set_capability("user_plugin", False, str(e))
+        # 即使发生异常，也返回 True，确保用户可以点击开关
+        _set_capability("user_plugin", True, str(e))
     
     # Warm up router discovery
     try:
@@ -1146,34 +1144,21 @@ async def set_agent_flags(payload: Dict[str, Any]):
         else:
             Modules.agent_flags["browser_use_enabled"] = False
             
+    # 3. Handle UserPlugin Flag (no capability check needed)
+    prev_up = Modules.agent_flags.get("user_plugin_enabled", False)
     if isinstance(uf, bool):
         if uf:  # Attempting to enable UserPlugin
             try:
-                async with httpx.AsyncClient(timeout=1.0) as client:
-                    r = await client.get(f"http://localhost:{USER_PLUGIN_SERVER_PORT}/plugins")
-                    if r.status_code != 200:
-                        _set_capability("user_plugin", False, f"user_plugin server responded {r.status_code}")
-                        Modules.agent_flags["user_plugin_enabled"] = False
-                        Modules.notification = "无法开启 UserPlugin: 插件服务不可用"
-                        logger.warning("[Agent] Cannot enable UserPlugin: service unavailable")
-                        return {"success": True, "agent_flags": Modules.agent_flags}
-                    data = r.json()
-                    plugins = data.get("plugins", []) if isinstance(data, dict) else []
-                    if not plugins:
-                        _set_capability("user_plugin", False, "未发现可用插件")
-                        Modules.agent_flags["user_plugin_enabled"] = False
-                        Modules.notification = "无法开启 UserPlugin: 未发现可用插件"
-                        logger.warning("[Agent] Cannot enable UserPlugin: no plugins found")
-                        return {"success": True, "agent_flags": Modules.agent_flags}
+                # 当用户尝试启用用户插件时，不需要检查插件服务器是否可用
+                # 插件服务器会在用户点击开关后启动
+                _set_capability("user_plugin", True, "")
+                Modules.agent_flags["user_plugin_enabled"] = True
             except Exception as e:
-                _set_capability("user_plugin", False, str(e))
-                Modules.agent_flags["user_plugin_enabled"] = False
-                Modules.notification = f"开启 UserPlugin 失败: {str(e)}"
-                logger.error(f"[Agent] Cannot enable UserPlugin: {e}")
-                return {"success": True, "agent_flags": Modules.agent_flags}
-        if uf:
-            _set_capability("user_plugin", True, "")
-        Modules.agent_flags["user_plugin_enabled"] = uf
+                # 即使发生异常，也设置为 True，确保用户可以点击开关
+                _set_capability("user_plugin", True, str(e))
+                Modules.agent_flags["user_plugin_enabled"] = True
+        else:  # Attempting to disable UserPlugin
+            Modules.agent_flags["user_plugin_enabled"] = False
 
     # testUserPlugin: log when user_plugin_enabled toggles
     try:

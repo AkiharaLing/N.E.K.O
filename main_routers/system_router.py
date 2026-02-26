@@ -17,6 +17,10 @@ import re
 import time
 from collections import deque
 from urllib.parse import unquote
+import subprocess
+import socket
+import threading
+from multiprocessing import Process, Event
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -34,7 +38,7 @@ from utils.screenshot_utils import analyze_screenshot_from_data_url
 from utils.language_utils import detect_language, translate_text, normalize_language_code, get_global_language
 from utils.frontend_utils import count_words_and_chars
 
-router = APIRouter(prefix="/api", tags=["system"])
+router = APIRouter(tags=["system"])
 logger = logging.getLogger("Main")
 
 # --- 主动搭话近期记录暂存区 ---
@@ -42,6 +46,163 @@ logger = logging.getLogger("Main")
 _proactive_chat_history: dict[str, deque] = {}
 
 _RECENT_CHAT_MAX_AGE_SECONDS = 3600  # 1小时内的搭话记录
+
+# --- 插件服务器管理 ---
+plugin_server_process = None
+plugin_server_ready_event = None
+
+
+def run_plugin_server(ready_event: Event):
+    """运行 Plugin Server"""
+    try:
+        # 确保工作目录正确
+        if getattr(sys, 'frozen', False):
+            if hasattr(sys, '_MEIPASS'):
+                # PyInstaller
+                os.chdir(sys._MEIPASS)
+            else:
+                # Nuitka
+                os.chdir(os.path.dirname(os.path.abspath(__file__)))
+            # 禁用 typeguard（子进程需要重新禁用）
+            try:
+                import typeguard
+                def dummy_typechecked(func=None, **kwargs):
+                    return func if func else (lambda f: f)
+                typeguard.typechecked = dummy_typechecked
+                if hasattr(typeguard, '_decorators'):
+                    typeguard._decorators.typechecked = dummy_typechecked
+            except:
+                pass
+        
+        import plugin.user_plugin_server
+        import uvicorn
+        from config import USER_PLUGIN_SERVER_PORT
+        
+        logger.info(f"[Plugin Server] Starting on port {USER_PLUGIN_SERVER_PORT}")
+        
+        # Plugin Server 不需要等待，立即通知就绪
+        ready_event.set()
+        
+        # 使用 uvicorn.Config 和 Server 来创建服务器实例
+        config = uvicorn.Config(plugin.user_plugin_server.app, host="127.0.0.1", port=USER_PLUGIN_SERVER_PORT, log_level="error")
+        server = uvicorn.Server(config)
+        
+        # 在新的事件循环中运行服务器
+        import asyncio
+        asyncio.run(server.serve())
+    except Exception as e:
+        logger.error(f"Plugin Server error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def check_port(port: int, timeout: float = 0.5) -> bool:
+    """检查端口是否已开放"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex(('127.0.0.1', port))
+        sock.close()
+        return result == 0
+    except:
+        return False
+
+
+@router.post('/plugin/server/start')
+async def start_plugin_server():
+    """启动插件服务器"""
+    global plugin_server_process, plugin_server_ready_event
+    
+    try:
+        from config import USER_PLUGIN_SERVER_PORT
+        
+        # 检查插件服务器是否已经在运行
+        if plugin_server_process and plugin_server_process.is_alive():
+            return JSONResponse({"success": True, "message": "插件服务器已经在运行"})
+        
+        # 检查端口是否被占用
+        if check_port(USER_PLUGIN_SERVER_PORT):
+            return JSONResponse({"success": True, "message": "插件服务器端口已经被占用，可能已经在运行"})
+        
+        # 创建进程间同步事件
+        plugin_server_ready_event = Event()
+        
+        # 使用 multiprocessing 启动插件服务器
+        plugin_server_process = Process(target=run_plugin_server, args=(plugin_server_ready_event,), daemon=False)
+        plugin_server_process.start()
+        
+        # 等待插件服务器就绪
+        plugin_server_ready_event.wait(timeout=5)
+        
+        logger.info(f"✓ Plugin Server 已启动 (PID: {plugin_server_process.pid})")
+        return JSONResponse({"success": True, "message": "插件服务器启动成功"})
+        
+    except Exception as e:
+        logger.error(f"启动插件服务器失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@router.post('/plugin/server/stop')
+async def stop_plugin_server():
+    """关闭插件服务器"""
+    global plugin_server_process
+    
+    try:
+        if not plugin_server_process or not plugin_server_process.is_alive():
+            return JSONResponse({"success": True, "message": "插件服务器已经关闭"})
+        
+        # 先尝试温和终止
+        plugin_server_process.terminate()
+        plugin_server_process.join(timeout=3)
+        
+        # 第二步：仍存活则 kill
+        if plugin_server_process.is_alive():
+            plugin_server_process.kill()
+            plugin_server_process.join(timeout=2)
+        
+        # 第三步：Windows 下兜底强杀整个进程树，防止孙进程残留
+        pid = plugin_server_process.pid
+        if pid and sys.platform == 'win32':
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False
+            )
+        
+        logger.info("✓ Plugin Server 已关闭")
+        plugin_server_process = None
+        return JSONResponse({"success": True, "message": "插件服务器关闭成功"})
+        
+    except Exception as e:
+        logger.error(f"关闭插件服务器失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@router.get('/plugin/server/status')
+async def get_plugin_server_status():
+    """获取插件服务器状态"""
+    global plugin_server_process
+    
+    try:
+        from config import USER_PLUGIN_SERVER_PORT
+        
+        is_running = False
+        is_port_open = check_port(USER_PLUGIN_SERVER_PORT)
+        
+        if plugin_server_process and plugin_server_process.is_alive():
+            is_running = True
+        
+        return JSONResponse({
+            "success": True,
+            "is_running": is_running,
+            "is_port_open": is_port_open,
+            "pid": plugin_server_process.pid if plugin_server_process else None
+        })
+        
+    except Exception as e:
+        logger.error(f"获取插件服务器状态失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)})
 
 
 def _extract_links_from_raw(mode: str, raw_data: dict) -> list[dict]:
@@ -1494,6 +1655,10 @@ async def plugin_ai_reply(request: Request):
             response_accumulator = []
             response_done_event = asyncio.Event()
             
+            # 保存原始回调
+            original_on_text_delta = mgr.session.on_text_delta
+            original_on_response_done = mgr.session.on_response_done
+            
             async def on_text_delta(text, is_first):
                 """捕获 AI 生成的文本"""
                 response_accumulator.append(text)
@@ -1501,10 +1666,12 @@ async def plugin_ai_reply(request: Request):
             async def on_response_done():
                 """响应完成时触发"""
                 response_done_event.set()
-            
-            # 保存原始回调
-            original_on_text_delta = mgr.session.on_text_delta
-            original_on_response_done = mgr.session.on_response_done
+                # 调用原始回调，确保触发信息总结
+                if original_on_response_done:
+                    try:
+                        await original_on_response_done()
+                    except Exception as e:
+                        logger.error(f"💥 调用原始 on_response_done 回调失败: {e}")
             
             # 设置临时回调
             mgr.session.on_text_delta = on_text_delta
@@ -1549,6 +1716,60 @@ async def plugin_ai_reply(request: Request):
                         "priority": 1,
                         "content": reply_message
                     })
+                    
+                    # 触发记忆整理：直接发送 analyze_request
+                    try:
+                        from main_logic.cross_server import _publish_analyze_request_with_fallback
+                        
+                        # 构造最近的消息摘要
+                        recent = [
+                            {"role": "user", "content": message},
+                            {"role": "assistant", "content": full_response}
+                        ]
+                        
+                        # 发送 analyze_request 触发记忆整理
+                        sent = await _publish_analyze_request_with_fallback(
+                            lanlan_name=lanlan_name,
+                            trigger="turn_end",
+                            messages=recent,
+                        )
+                        
+                        if sent:
+                            logger.info(f"✅ 插件消息已触发记忆整理: source={plugin_id}, messages={len(recent)}")
+                        else:
+                            logger.info(f"⚠️ 插件消息触发记忆整理失败: source={plugin_id}")
+                            
+                    except Exception as e:
+                        logger.exception(f"❌ 触发记忆整理异常: {e}")
+                    
+                    # 将插件消息添加到记忆系统
+                    try:
+                        import aiohttp
+                        import json
+                        from langchain_core.messages import HumanMessage, AIMessage
+                        
+                        # 构造消息对象
+                        input_history = [
+                            HumanMessage(content=message),
+                            AIMessage(content=full_response)
+                        ]
+                        
+                        # 调用记忆系统的 /cache 接口
+                        from config import MEMORY_SERVER_PORT
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(
+                                f"http://127.0.0.1:{MEMORY_SERVER_PORT}/cache/{lanlan_name}",
+                                json={'input_history': json.dumps([msg.dict() for msg in input_history])},
+                                timeout=aiohttp.ClientTimeout(total=10.0)
+                            ) as response:
+                                result = await response.json()
+                                if result.get('status') == 'cached':
+                                    logger.info(f"✅ 插件消息已添加到记忆系统: source={plugin_id}, count={result.get('count', 0)}")
+                                else:
+                                    logger.warning(f"⚠️ 插件消息添加到记忆系统失败: source={plugin_id}, error={result.get('message')}")
+                                    
+                    except Exception as e:
+                        logger.exception(f"❌ 添加到记忆系统异常: {e}")
                     
                     logger.info(f"✅ AI 回复已推送到消息队列: source={plugin_id}")
                     return JSONResponse({

@@ -796,31 +796,46 @@ def wait_for_servers(timeout: int = 60) -> bool:
     start_time = time.time()
     all_ready = False
     
-    # 第一步：等待所有端口就绪
+    # 第一步：等待所有端口就绪（除了插件服务器）
     while time.time() - start_time < timeout:
         ready_count = 0
         for server in SERVERS:
+            # 跳过插件服务器，它将在需要时启动
+            if server['module'] == 'plugin_server':
+                continue
+                
             if check_port(server['port']):
                 ready_count += 1
         
-        if ready_count == len(SERVERS):
+        # 计算需要就绪的服务器数量（排除插件服务器）
+        required_ready_count = len([s for s in SERVERS if s['module'] != 'plugin_server'])
+        if ready_count == required_ready_count:
             break
         
         time.sleep(0.5)
     
     # 第二步：等待所有服务器的 ready_event（同步初始化完成）
-    if ready_count == len(SERVERS):
+    # 计算需要就绪的服务器数量（排除插件服务器）
+    required_ready_count = len([s for s in SERVERS if s['module'] != 'plugin_server'])
+    current_ready_count = 0
+    
+    if ready_count == required_ready_count:
         for server in SERVERS:
+            # 跳过插件服务器，它将在需要时启动
+            if server['module'] == 'plugin_server':
+                continue
+                
             remaining_time = timeout - (time.time() - start_time)
             if remaining_time > 0:
                 if server['ready_event'].wait(timeout=remaining_time):
-                    continue
+                    current_ready_count += 1
                 else:
                     # 超时
                     break
         else:
             # 所有服务器都就绪了
-            all_ready = True
+            if current_ready_count == required_ready_count:
+                all_ready = True
     
     # 停止动画
     stop_spinner.set()
@@ -946,10 +961,15 @@ def main():
         print("N.E.K.O. 服务器启动器", flush=True)
         print("=" * 60, flush=True)
 
-        # 1. 启动所有服务器
+        # 1. 启动所有服务器（除了插件服务器，它将在需要时启动）
         print("\n正在启动服务器...\n", flush=True)
         all_started = True
         for server in SERVERS:
+            # 跳过插件服务器，它将在需要时启动
+            if server['module'] == 'plugin_server':
+                print(f"⏳ {server['name']} 将在需要时启动", flush=True)
+                continue
+                
             if not start_server(server):
                 all_started = False
                 break
@@ -996,7 +1016,7 @@ def main():
                 print("\n检测到服务器异常退出！", flush=True)
                 break
             # 对复用已有实例的服务进行健康探测
-            reused = [s for s in SERVERS if s.get('process') is None and s.get('port')]
+            reused = [s for s in SERVERS if s.get('process') is None and s.get('port') and s['module'] != 'plugin_server']
             for s in reused:
                 if probe_neko_health(s['port']) is None:
                     print(f"\n复用的 {s['name']}(port {s['port']}) 已不可达！", flush=True)

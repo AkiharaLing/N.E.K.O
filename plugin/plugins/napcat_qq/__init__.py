@@ -231,6 +231,9 @@ class NapCatQQPlugin(NekoPluginBase):
                             "is_master": is_master,
                             "raw": msg_data
                         }
+                        # 自动回复处理
+                        await self._handle_auto_reply(msg_data, neko_msg)
+                        
                         # 推送到 N.E.K.O 主系统
                         self.ctx.push_message(
                             source=self._plugin_id,
@@ -239,9 +242,6 @@ class NapCatQQPlugin(NekoPluginBase):
                             priority=1,
                             content=neko_msg,
                         )
-                        
-                        # 自动回复处理
-                        await self._handle_auto_reply(msg_data, neko_msg)
                 except asyncio.TimeoutError:
                     # 超时是正常的，继续循环
                     continue

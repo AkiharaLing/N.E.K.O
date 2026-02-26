@@ -279,6 +279,33 @@
                     setGlobalBusy(true, window.t ? window.t('settings.toggles.checking') : '已接受操作，切换中...');
                     render('command');
                     try {
+                        // 处理用户插件开关状态变化，启动或关闭插件服务器
+                        if (key === 'user_plugin_enabled') {
+                            if (value) {
+                                // 启动插件服务器
+                                const startResponse = await fetch('/plugin/server/start', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' }
+                                });
+                                const startResult = await startResponse.json();
+                                if (!startResult.success) {
+                                    console.error('启动插件服务器失败:', startResult.error);
+                                    throw new Error(`启动插件服务器失败: ${startResult.error}`);
+                                }
+                            } else {
+                                // 关闭插件服务器
+                                const stopResponse = await fetch('/plugin/server/stop', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' }
+                                });
+                                const stopResult = await stopResponse.json();
+                                if (!stopResult.success) {
+                                    console.error('关闭插件服务器失败:', stopResult.error);
+                                    throw new Error(`关闭插件服务器失败: ${stopResult.error}`);
+                                }
+                            }
+                        }
+                        
                         await sendCommand('set_flag', { key, value });
                         const ts = performance.now();
                         await fetchSnapshot().catch(() => { });
