@@ -130,9 +130,12 @@ class PluginMessageRouter:
         source = msg.get("source", "")
         content = msg.get("content")
         
+        logger.info(f"📨 处理消息: msg_type={msg_type}, source={source}")
+        
         # 处理来自主系统的 AI 回复消息
         if source == "main_system" and isinstance(content, dict):
             content_source = content.get("source", "")
+            logger.info(f"🤖 检测到AI回复消息: content_source={content_source}")
             if content_source:
                 # 将 AI 回复发送到目标插件的 cmd_queue
                 await self._send_message_to_plugin(content_source, msg)
@@ -178,6 +181,8 @@ class PluginMessageRouter:
         """
         from plugin.core.state import state
         
+        logger.info(f"📤 准备发送消息到插件: plugin_id={plugin_id}")
+        
         host = state.plugin_hosts.get(plugin_id)
         if not host:
             logger.warning(f"⚠️ 插件 {plugin_id} 未注册，无法发送消息")
@@ -192,7 +197,7 @@ class PluginMessageRouter:
                 source=msg.get("source", ""),
                 content=msg.get("content", {})
             )
-            logger.debug(f"✅ 消息已发送到插件 {plugin_id}")
+            logger.info(f"✅ 消息已发送到插件 {plugin_id}")
         except Exception as e:
             logger.exception(f"❌ 发送消息到插件 {plugin_id} 失败: {e}")
     

@@ -62,17 +62,6 @@ async def startup() -> None:
     except Exception as e:
         logger.warning(f"插件消息路由器启动失败: {e}")
     
-    # 为每个插件启动反向消息消费者
-    for plugin_id, host in state.plugin_hosts.items():
-        try:
-            await host.start_reverse_message_consumer(
-                source_queue=state.message_queue,
-                source_filter=plugin_id
-            )
-            logger.info(f"✅ 插件 {plugin_id} 反向消息消费者已启动")
-        except Exception as e:
-            logger.warning(f"插件 {plugin_id} 反向消息消费者启动失败: {e}")
-    
     # 启动状态消费任务
     await status_manager.start_status_consumer(
         plugin_hosts_getter=lambda: state.plugin_hosts
