@@ -158,6 +158,7 @@ class CursorFollowController {
 
         // ── 鼠标跟踪启用状态 ──
         this._enabled = true;
+        this._userDisabled = false;  // 记录用户显式禁用，避免性能档切换覆盖
 
         // ── 鼠标状态 ──
         this._rawMouseX = 0;
@@ -224,7 +225,6 @@ class CursorFollowController {
         // ── 性能档位 ──
         this._performanceLevel = 'high';
         this._perfRuntime = { ...CURSOR_FOLLOW_PERF_PRESETS.high };
-        this._enabled = true;
         this._onPerfLevelChanged = null;
     }
 
@@ -343,7 +343,7 @@ class CursorFollowController {
 
         this._performanceLevel = CURSOR_FOLLOW_PERF_PRESETS[normalized] ? normalized : 'high';
         this._perfRuntime = { ...preset };
-        this._enabled = this._perfRuntime.enabled !== false;
+        this._enabled = this._perfRuntime.enabled !== false && !this._userDisabled;
 
         if (!this._enabled) {
             // 关闭追踪时清空目标旋转，避免恢复时残留历史偏移
@@ -793,7 +793,8 @@ class CursorFollowController {
     //  启用/禁用鼠标跟踪
     // ════════════════════════════════════════════════════════════════
     setEnabled(enabled) {
-        this._enabled = enabled;
+        this._userDisabled = !enabled;
+        this._enabled = this._perfRuntime.enabled !== false && !this._userDisabled;
         if (!enabled) {
             this.reset();
             // 恢复骨骼到默认姿态

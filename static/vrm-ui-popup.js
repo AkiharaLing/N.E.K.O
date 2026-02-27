@@ -526,6 +526,8 @@ VRMManager.prototype._createAnimationSettingsSidePanel = function () {
     // --- 跟踪鼠标开关 ---
     const mouseTrackingRow = document.createElement('div');
     Object.assign(mouseTrackingRow.style, { display: 'flex', alignItems: 'center', gap: '8px', width: '100%', marginTop: '4px' });
+    mouseTrackingRow.setAttribute('role', 'switch');
+    mouseTrackingRow.tabIndex = 0;
 
     const mouseTrackingLabel = document.createElement('span');
     mouseTrackingLabel.textContent = window.t ? window.t('settings.toggles.mouseTracking') : '跟踪鼠标';
@@ -539,14 +541,21 @@ VRMManager.prototype._createAnimationSettingsSidePanel = function () {
     Object.assign(mouseTrackingCheckbox.style, { display: 'none' });
 
     const { indicator: mouseTrackingIndicator, updateStyle: updateMouseTrackingStyle } = this._createCheckIndicator();
+    mouseTrackingIndicator.setAttribute('role', 'switch');
+    mouseTrackingIndicator.tabIndex = 0;
     updateMouseTrackingStyle(mouseTrackingCheckbox.checked);
 
     const updateMouseTrackingRowStyle = () => {
         updateMouseTrackingStyle(mouseTrackingCheckbox.checked);
+        const ariaChecked = mouseTrackingCheckbox.checked ? 'true' : 'false';
+        mouseTrackingRow.setAttribute('aria-checked', ariaChecked);
+        mouseTrackingIndicator.setAttribute('aria-checked', ariaChecked);
         mouseTrackingRow.style.background = mouseTrackingCheckbox.checked
             ? 'var(--neko-popup-selected-bg, rgba(68,183,254,0.1))'
             : 'transparent';
     };
+    // 与弹窗显示时的通用 syncCheckbox 机制兼容
+    mouseTrackingCheckbox.updateStyle = updateMouseTrackingRowStyle;
     updateMouseTrackingRowStyle();
 
     const handleMouseTrackingToggle = () => {
@@ -570,6 +579,15 @@ VRMManager.prototype._createAnimationSettingsSidePanel = function () {
         e.stopPropagation();
         handleMouseTrackingToggle();
     });
+    const handleMouseTrackingKeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            handleMouseTrackingToggle();
+        }
+    };
+    mouseTrackingRow.addEventListener('keydown', handleMouseTrackingKeydown);
+    mouseTrackingIndicator.addEventListener('keydown', handleMouseTrackingKeydown);
     mouseTrackingLabel.addEventListener('click', (e) => {
         e.stopPropagation();
         handleMouseTrackingToggle();
