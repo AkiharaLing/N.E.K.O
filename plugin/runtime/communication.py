@@ -371,7 +371,7 @@ class PluginCommunicationResourceManager:
                         lambda: self.cmd_queue.put({
                             "type": "MESSAGE",
                             "source": msg.get("source", ""),
-                            "content": msg.get("content", {})
+                            "content": msg
                         }, timeout=QUEUE_GET_TIMEOUT)
                     )
                     self.logger.debug(

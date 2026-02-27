@@ -211,6 +211,11 @@ async def plugin_push_message(payload: PluginPushMessageRequest):
             success=True,
             message_id=message_id,
             received_at=now_iso(),
+            plugin_id=payload.plugin_id,
+            source=payload.source,
+            message_type=payload.message_type,
+            description=payload.description,
+            priority=payload.priority,
         )
     except HTTPException:
         raise

@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import json
+from multiprocessing import RawArray
 import threading
 import queue
 import websockets
@@ -578,9 +579,30 @@ class NapCatQQPlugin(NekoPluginBase):
         },
         source="main_system"
     )
-    def handle_ai_reply(self, type: str, source: str, reply: str, metadata: dict = None, **_):
+    def handle_ai_reply(self, message: dict):
         """处理 AI 回复并发送到 QQ"""
-        if not reply or not reply.strip():
+        # message包含完整的消息对象：
+        # {
+        #   "type": "MESSAGE_PUSH",
+        #   "plugin_id": "napcat_qq",
+        #   "source": "main_system",
+        #   "message_type": "ai_reply",
+        #   "description": "AI 回复给 napcat_qq",
+        #   "priority": 1,
+        #   "content": "AI回复内容...",
+        #   "metadata": {...},
+        #   "time": "..."
+        # }
+        
+        content = message.get("content", "")
+        metadata = message.get("metadata", {})
+        self.logger.info(f"收到AI回复消息:content={content}, metadata={metadata}")
+        # content可能是字符串（AI回复内容）
+        if not isinstance(content, str):
+            # 如果content不是字符串，尝试转换为字符串
+            content = str(content)
+        
+        if not content or not content.strip():
             self.logger.warning("⚠️ 收到空回复，跳过发送")
             return {"success": False, "error": "空回复"}
         
@@ -593,19 +615,19 @@ class NapCatQQPlugin(NekoPluginBase):
             return {"success": False, "error": "缺少目标ID"}
         
         # 截断过长的回复
-        if len(reply) > self.max_reply_length:
-            reply = reply[:self.max_reply_length] + "..."
+        if len(content) > self.max_reply_length:
+            content = content[:self.max_reply_length] + "..."
             self.logger.warning(f"⚠️ 回复过长，已截断到 {self.max_reply_length} 字符")
         
         # 发送回复
         result = self.send_qq_message(
             target_type=message_type,
             target_id=target_id,
-            content=reply
+            content=content
         )
         
         if result.get("retcode") == 0:
-            self.logger.info(f"✅ AI 回复已发送: {reply[:50]}...")
+            self.logger.info(f"✅ AI 回复已发送: {content[:50]}...")
             return {"success": True, "sent": True}
         else:
             self.logger.error(f"❌ AI 回复发送失败: {result}")

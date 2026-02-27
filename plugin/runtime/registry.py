@@ -96,6 +96,23 @@ def scan_static_metadata(pid: str, cls: type, conf: dict, pdata: dict) -> None:
                 state.event_handlers[f"{pid}.{eid}"] = handler_obj
                 state.event_handlers[f"{pid}:plugin_entry:{eid}"] = handler_obj
             plugin_entry_method_map[(pid, str(eid))] = name
+        
+        # 扫描并注册消息处理器到全局消息路由器
+        if event_meta and getattr(event_meta, "event_type", None) == "message":
+            eid = getattr(event_meta, "id", name)
+            source_filter = getattr(event_meta, "extra", {}).get("source")
+            
+            # 注册到全局消息路由器
+            try:
+                from plugin.message_router import get_message_router
+                router = get_message_router()
+                router.register_handler(
+                    plugin_id=pid,
+                    handler_func=member
+                )
+                logger.info(f"✅ 已注册消息处理器: plugin_id={pid}, handler_id={eid}, source={source_filter}")
+            except Exception as e:
+                logger.warning(f"⚠️ 注册消息处理器失败: plugin_id={pid}, handler_id={eid}, error={e}")
 
     entries = conf.get("entries") or pdata.get("entries") or []
     for ent in entries:

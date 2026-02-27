@@ -62,7 +62,7 @@ class PluginPushMessageRequest(BaseModel):
     source: str = Field(..., description="插件自己标明的来源")
     description: str = Field(default="", description="插件自己标明的描述")
     priority: int = Field(default=0, description="插件自己设定的优先级，数字越大优先级越高")
-    message_type: Literal["text", "url", "binary", "binary_url"] = Field(..., description="消息类型")
+    message_type: Literal["text", "url", "binary", "binary_url", "ai_reply"] = Field(..., description="消息类型")
     content: Optional[str] = Field(default=None, description="文本内容或URL（当message_type为text或url时）")
     binary_data: Optional[bytes] = Field(default=None, description="二进制数据（当message_type为binary时，仅用于小文件）")
     binary_url: Optional[str] = Field(default=None, description="二进制文件的URL（当message_type为binary_url时）")
@@ -75,7 +75,7 @@ class PluginPushMessage(BaseModel):
     source: str
     description: str
     priority: int
-    message_type: Literal["text", "url", "binary", "binary_url"]
+    message_type: Literal["text", "url", "binary", "binary_url", "ai_reply"]
     content: Optional[str] = None
     binary_data: Optional[bytes] = None
     binary_url: Optional[str] = None
@@ -96,4 +96,9 @@ class PluginPushMessageResponse(BaseModel):
     success: bool
     message_id: str
     received_at: str
+    plugin_id: Optional[str] = Field(None, description="插件ID")
+    source: Optional[str] = Field(None, description="消息来源")
+    message_type: Optional[Literal["text", "url", "binary", "binary_url", "ai_reply"]] = Field(None, description="消息类型")
+    description: Optional[str] = Field(None, description="消息描述")
+    priority: Optional[int] = Field(None, description="消息优先级")
     error: Optional[str] = None

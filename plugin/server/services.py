@@ -33,7 +33,7 @@ def build_plugin_list() -> List[Dict[str, Any]]:
     """
     构建插件列表
     
-    返回格式化的插件信息列表，包括每个插件的入口点信息。
+    返回格式化的插件信息列表，包括每个插件的入口点信息和消息处理器信息。
     """
     result = []
     
@@ -51,34 +51,46 @@ def build_plugin_list() -> List[Dict[str, Any]]:
             plugin_info = plugin_meta.copy()
             plugin_info["entries"] = []
             
-            # 处理每个插件的入口点
+            # 处理每个插件的入口点和消息处理器
             seen = set()  # 用于去重 (event_type, id)
             # 创建 event_handlers 的副本以避免长时间持有锁
             with state.event_handlers_lock:
                 event_handlers_copy = dict(state.event_handlers)
             for key, eh in event_handlers_copy.items():
-                if not (key.startswith(f"{plugin_id}.") or key.startswith(f"{plugin_id}:plugin_entry:")):
+                # 只处理当前插件的事件
+                if not (key.startswith(f"{plugin_id}.") or key.startswith(f"{plugin_id}:plugin_entry:") or key.startswith(f"{plugin_id}:message:")):
                     continue
-                if getattr(eh.meta, "event_type", None) != "plugin_entry":
+                
+                # 处理 plugin_entry 和 message 类型的事件
+                event_type = getattr(eh.meta, "event_type", None)
+                if event_type not in ["plugin_entry", "message"]:
                     continue
                 
                 # 去重判定键：优先使用 meta.id，再退回到 key
                 eid = getattr(eh.meta, "id", None) or key
-                dedup_key = (getattr(eh.meta, "event_type", "plugin_entry"), eid)
+                dedup_key = (event_type, eid)
                 if dedup_key in seen:
                     continue
                 seen.add(dedup_key)
                 
                 # 安全获取各字段
                 returned_message = getattr(eh.meta, "return_message", "")
-                plugin_info["entries"].append({
+                entry_info = {
                     "id": getattr(eh.meta, "id", eid),
                     "name": getattr(eh.meta, "name", ""),
                     "description": getattr(eh.meta, "description", ""),
                     "event_key": key,
+                    "event_type": event_type,  # 添加事件类型标识
                     "input_schema": getattr(eh.meta, "input_schema", {}),
                     "return_message": returned_message,
-                })
+                }
+                
+                # 如果是消息处理器，添加source信息
+                if event_type == "message":
+                    source = getattr(eh.meta, "extra", {}).get("source")
+                    entry_info["source"] = source
+                
+                plugin_info["entries"].append(entry_info)
             
             result.append(plugin_info)
             
@@ -92,7 +104,6 @@ def build_plugin_list() -> List[Dict[str, Any]]:
                 "entries": [],
             })
     
-    logger.debug("Loaded plugins: %s", result)
     return result
 
 

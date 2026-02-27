@@ -126,6 +126,9 @@ class LLMSessionManager:
         # 模式标志: 'audio' 或 'text'
         self.input_mode = 'audio'
         
+        # 插件AI回复标志：标记当前是否是插件触发的AI回复
+        self.is_plugin_ai_reply = False
+        
         # 初始化时创建audio模式的session（默认）
         self.session = None
         
@@ -210,6 +213,11 @@ class LLMSessionManager:
 
     async def handle_text_data(self, text: str, is_first_chunk: bool = False):
         """文本回调：处理文本显示和TTS（用于文本模式）"""
+        
+        # 如果是插件AI回复，不发送文本到前端和TTS
+        if self.is_plugin_ai_reply:
+            logger.debug(f"插件AI回复模式，跳过前端显示和TTS: {text[:50]}...")
+            return
         
         # 如果是新消息的第一个chunk，清空TTS队列和缓存以打断之前的语音
         if is_first_chunk and self.use_tts:

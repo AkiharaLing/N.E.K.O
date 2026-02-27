@@ -1850,7 +1850,9 @@ async def plugin_ai_reply(request: Request):
                 "success": False,
                 "error": "缺少必要参数: plugin_id 或 message"
             }, status_code=400)
-        
+
+        logger.info(f"收到插件 AI 回复请求: plugin_id={plugin_id}, message={message[:50]}, metadata={metadata}")
+
         # 检查用户插件是否启用（通过 HTTP 请求获取真实状态）
         from config import TOOL_SERVER_PORT
         try:
@@ -1910,40 +1912,45 @@ async def plugin_ai_reply(request: Request):
         context_prompt = message
         
         # 使用 AI 处理消息
-        # 这里我们直接调用 session 的 stream_text 方法
+        # 复用前端的 stream_data 逻辑
         try:
-            # 确保会话已启动
-            if not mgr.session or not mgr.is_active:
-                await mgr.start_session(mgr.websocket, new=False, input_mode='text')
+            # 设置插件AI回复标志，阻止前端播放声音
+            mgr.is_plugin_ai_reply = True
             
-            # 捕获 AI 响应
+            # 构造前端消息格式
+            stream_message = {
+                "action": "stream_data",
+                "input_type": "text",
+                "data": message
+            }
+            
+            # 临时替换回调来捕获响应
             response_accumulator = []
             response_done_event = asyncio.Event()
             
+            # 保存原始回调（初始化为None）
+            original_on_text_delta = None
+            original_on_response_done = None
+            
             # 保存原始回调
-            original_on_text_delta = mgr.session.on_text_delta
-            original_on_response_done = mgr.session.on_response_done
+            if mgr.session:
+                original_on_text_delta = mgr.session.on_text_delta
+                original_on_response_done = mgr.session.on_response_done
+                
+                async def on_text_delta(text, is_first):
+                    """捕获 AI 生成的文本"""
+                    response_accumulator.append(text)
+                
+                async def on_response_done():
+                    """响应完成时触发"""
+                    response_done_event.set()
+                
+                # 设置临时回调
+                mgr.session.on_text_delta = on_text_delta
+                mgr.session.on_response_done = on_response_done
             
-            async def on_text_delta(text, is_first):
-                """捕获 AI 生成的文本"""
-                response_accumulator.append(text)
-            
-            async def on_response_done():
-                """响应完成时触发"""
-                response_done_event.set()
-                # 调用原始回调，确保触发信息总结
-                if original_on_response_done:
-                    try:
-                        await original_on_response_done()
-                    except Exception as e:
-                        logger.error(f"💥 调用原始 on_response_done 回调失败: {e}")
-            
-            # 设置临时回调
-            mgr.session.on_text_delta = on_text_delta
-            mgr.session.on_response_done = on_response_done
-            
-            # 发送消息给 AI
-            await mgr.session.stream_text(context_prompt)
+            # 调用 stream_data，复用现有逻辑
+            await mgr.stream_data(stream_message)
             
             # 等待响应完成（最多 30 秒）
             try:
@@ -1952,8 +1959,12 @@ async def plugin_ai_reply(request: Request):
                 logger.warning(f"⚠️ AI 响应超时: source={plugin_id}")
             
             # 恢复原始回调
-            mgr.session.on_text_delta = original_on_text_delta
-            mgr.session.on_response_done = original_on_response_done
+            if mgr.session and original_on_text_delta:
+                mgr.session.on_text_delta = original_on_text_delta
+                mgr.session.on_response_done = original_on_response_done
+            
+            # 清除插件AI回复标志
+            mgr.is_plugin_ai_reply = False
             
             # 获取完整响应
             full_response = "".join(response_accumulator)
@@ -1976,6 +1987,7 @@ async def plugin_ai_reply(request: Request):
                     
                     # 通过HTTP API推送到插件服务器
                     async with httpx.AsyncClient(timeout=5.0) as client:
+
                         response = await client.post(
                             f"http://127.0.0.1:{USER_PLUGIN_SERVER_PORT}/plugin/push",
                             json={
@@ -1984,14 +1996,21 @@ async def plugin_ai_reply(request: Request):
                                 "message_type": "ai_reply",
                                 "description": f"AI 回复给 {plugin_id}",
                                 "priority": 1,
-                                "content": reply_message,
-                                "metadata": metadata
+                                "content": full_response,
+                                "metadata": {
+                                    **metadata,
+                                    "ai_reply_type": "ai_reply",
+                                    "ai_reply_source": plugin_id
+                                }
                             }
                         )
                         if response.status_code == 200:
                             result = response.json()
                             if result.get("success"):
+                                metadata_final={**metadata, "ai_reply_type": "ai_reply","ai_reply_source": plugin_id}
                                 logger.info(f"✅ AI 回复已推送到插件服务器: plugin_id={plugin_id}")
+                                logger.info(f"完整回复: {full_response},元数据={metadata}")
+                                logger.info(f"推送元数据: {metadata_final}")
                             else:
                                 logger.warning(f"⚠️ 推送到插件服务器失败: {result}")
                         else:
