@@ -1,9 +1,10 @@
 """
 SDK version declaration for plugin compatibility checks.
 
-此模块从 plugin.types.version 重导出，保持向后兼容。
+This constant represents the current SDK version that plugins are expected
+to support. Plugin configurations can declare their required SDK version
+and the loader will validate it against this value.
 """
-from plugin._types.version import SDK_VERSION
 
-__all__ = ["SDK_VERSION"]
+SDK_VERSION = "0.1.0"
 
